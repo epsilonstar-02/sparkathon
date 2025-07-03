@@ -5,7 +5,7 @@ This directory contains all the API integration code for connecting your fronten
 ## 📁 File Structure
 
 ```
-src/api/
+src/sapi/
 ├── config.js              # API configuration and endpoints
 ├── client.js               # HTTP client for API requests
 ├── services/
