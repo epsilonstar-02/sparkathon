@@ -1,0 +1,78 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider             = "prisma-client-py"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  price       Float
+  description String
+  category    String
+  inStock     Boolean
+  aisle       String
+  createdAt   DateTime @default(now())
+  
+  shoppingListItems ShoppingListItem[]
+  
+  @@map("products")
+}
+
+model User {
+  id          String   @id @default(cuid())
+  name        String
+  email       String   @unique
+  profile     Json?    // Store complex user profile as JSON
+  createdAt   DateTime @default(now())
+  
+  shoppingList ShoppingListItem[]
+  orders      Order[]
+  chats       ChatMessage[]
+  
+  @@map("users")
+}
+
+model ShoppingListItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  quantity  Int      @default(1)
+  addedAt   DateTime @default(now())
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@map("shopping_list_items")
+}
+
+model Order {
+  id        String   @id @default(cuid())
+  userId    String
+  items     Json     // Array of {productId, quantity}
+  total     Float
+  createdAt DateTime @default(now())
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("orders")
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  content   String
+  isUser    Boolean  // True for user messages
+  timestamp DateTime @default(now())
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("chat_messages")
+}
