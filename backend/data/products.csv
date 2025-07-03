@@ -1,0 +1,21 @@
+name,price,description,category,inStock,aisle
+Great Value Milk,3.48,Fresh whole milk 1 gallon,Dairy,true,A1
+Yoplait Greek Yogurt,5.98,Mixed berry Greek yogurt 4-pack,Dairy,true,A1
+Lay's Classic Chips,3.98,Original potato chips family size,Snacks,true,B3
+Doritos Nacho Cheese,4.48,Nacho cheese tortilla chips,Snacks,false,B3
+Coca-Cola 2L,2.98,Classic Coca-Cola 2 liter bottle,Drinks,true,C2
+Pepsi 2L,2.78,Pepsi cola 2 liter bottle,Drinks,true,C2
+Tyson Chicken Breast,12.98,Boneless skinless chicken breast 3lb,Meat,true,D1
+Oscar Mayer Bacon,6.48,Thick cut bacon 16oz,Meat,true,D1
+Bananas,1.28,Fresh bananas per pound,Produce,true,E1
+Fresh Strawberries,4.98,Fresh strawberries 1lb container,Produce,false,E1
+Kellogg's Corn Flakes,4.68,Original corn flakes cereal,Cereal,true,F2
+Cheerios,5.48,Honey nut cheerios cereal,Cereal,true,F2
+Wonder Bread,2.48,Classic white bread loaf,Bakery,true,G1
+Tide Laundry Detergent,11.97,Tide original liquid detergent 100oz,Household,true,H3
+Charmin Toilet Paper,12.97,Charmin ultra soft 12 mega rolls,Household,true,H3
+Great Value Eggs,2.78,Large white eggs dozen,Dairy,true,A1
+Ground Beef 80/20,5.98,Fresh ground beef 80/20 per pound,Meat,true,D1
+Gala Apples,3.98,Fresh gala apples 3lb bag,Produce,true,E1
+Orange Juice,4.98,Tropicana pure premium orange juice 52oz,Drinks,true,C2
+Kraft Mac & Cheese,1.98,Original macaroni and cheese dinner,Pantry,true,I1
