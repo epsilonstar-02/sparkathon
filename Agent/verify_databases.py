@@ -8,11 +8,11 @@ def main():
     cursor.execute('SELECT COUNT(*) FROM products')
     count = cursor.fetchone()[0]
     print(f'SQLite products count: {count}')
-    cursor.execute('SELECT name, type, price FROM products LIMIT 3')
+    cursor.execute('SELECT name, category, price, aisle, availability FROM products LIMIT 3')
     samples = cursor.fetchall()
     print('Sample products:')
-    for name, type_val, price in samples:
-        print(f'  - {name} ({type_val}) - ${price}')
+    for name, category, price, aisle, availability in samples:
+        print(f'  - {name} ({category}) - ${price} - Aisle: {aisle} - {availability}')
     conn.close()
     print('\n=== ChromaDB Verification ===')
     client = chromadb.PersistentClient(path='./chroma_db')
