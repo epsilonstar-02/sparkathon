@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class ProductDataIngester:
-    def __init__(self, csv_file: str = "Walmart_data_cleaned.csv"):
+    def __init__(self, csv_file: str = "walmart_data_new.csv"):
         self.csv_file = csv_file
         self.sql_db_path = "walmart_products.db"
         self.chroma_db_path = "./chroma_db"
@@ -35,7 +35,7 @@ class ProductDataIngester:
             raise FileNotFoundError(f"CSV file not found: {self.csv_file}")
         df = pd.read_csv(self.csv_file)
         logger.info(f"Loaded {len(df)} products from CSV")
-        required_columns = ['id', 'name', 'brand', 'type', 'shortDescription', 'price', 'averageRating']
+        required_columns = ['id', 'name', 'brand', 'category', 'shortDescription', 'price', 'averageRating']
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
@@ -48,7 +48,7 @@ class ProductDataIngester:
         df['brand'] = df['brand'].fillna('Unknown')
         df['averageRating'] = pd.to_numeric(df['averageRating'], errors='coerce').fillna(0.0)
         df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0.0)
-        df = df.dropna(subset=['id', 'name', 'type'])
+        df = df.dropna(subset=['id', 'name', 'category'])
         logger.info(f"Data cleaned. {len(df)} products ready for processing")
         return df
     
@@ -58,8 +58,8 @@ class ProductDataIngester:
             text_parts.append(f"Product: {row['name']}")
         if pd.notna(row['brand']) and row['brand'] and row['brand'] != 'Unknown':
             text_parts.append(f"Brand: {row['brand']}")
-        if pd.notna(row['type']) and row['type']:
-            text_parts.append(f"Category: {row['type']}")
+        if pd.notna(row['category']) and row['category']:
+            text_parts.append(f"Category: {row['category']}")
         if pd.notna(row['shortDescription']) and row['shortDescription']:
             description = row['shortDescription'][:500] + "..." if len(row['shortDescription']) > 500 else row['shortDescription']
             text_parts.append(f"Description: {description}")
@@ -87,10 +87,7 @@ class ProductDataIngester:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS products (
                 id TEXT PRIMARY KEY,
-                keyword TEXT,
-                page INTEGER,
-                position INTEGER,
-                type TEXT,
+                category TEXT,
                 name TEXT NOT NULL,
                 brand TEXT,
                 average_rating REAL,
@@ -98,13 +95,17 @@ class ProductDataIngester:
                 thumbnail_url TEXT,
                 price REAL,
                 currency_unit TEXT,
+                aisle TEXT,
+                availability TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_type ON products(type)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_category ON products(category)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_brand ON products(brand)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_price ON products(price)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_rating ON products(average_rating)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_aisle ON products(aisle)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_availability ON products(availability)')
         conn.commit()
         conn.close()
         logger.info("SQLite database setup complete")
@@ -116,24 +117,23 @@ class ProductDataIngester:
         for _, row in df.iterrows():
             sql_data.append((
                 row['id'],
-                row.get('keyword', ''),
-                int(row.get('page', 0)) if pd.notna(row.get('page')) else 0,
-                int(row.get('position', 0)) if pd.notna(row.get('position')) else 0,
-                row['type'],
+                row['category'],
                 row['name'],
                 row['brand'],
                 float(row['averageRating']) if pd.notna(row['averageRating']) else 0.0,
                 row['shortDescription'],
                 row.get('thumbnailUrl', ''),
                 float(row['price']) if pd.notna(row['price']) else 0.0,
-                row.get('currencyUnit', 'USD')
+                row.get('currencyUnit', 'USD'),
+                row.get('aisle', ''),
+                row.get('availability', 'unknown')
             ))
         cursor = conn.cursor()
         cursor.executemany('''
             INSERT OR REPLACE INTO products 
-            (id, keyword, page, position, type, name, brand, average_rating, 
-             short_description, thumbnail_url, price, currency_unit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, category, name, brand, average_rating, 
+             short_description, thumbnail_url, price, currency_unit, aisle, availability)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', sql_data)
         conn.commit()
         conn.close()
@@ -149,13 +149,15 @@ class ProductDataIngester:
             ids.append(str(row['id']))
             documents.append(self.create_embeddings_text(row))
             metadata = {
-                'category': row['type'],
+                'category': row['category'],
                 'brand': row['brand'],
                 'name': row['name'],
                 'price': float(row['price']) if pd.notna(row['price']) else 0.0,
                 'average_rating': float(row['averageRating']) if pd.notna(row['averageRating']) else 0.0,
                 'currency_unit': row.get('currencyUnit', 'USD'),
-                'thumbnail_url': row.get('thumbnailUrl', '')
+                'thumbnail_url': row.get('thumbnailUrl', ''),
+                'aisle': row.get('aisle', ''),
+                'availability': row.get('availability', 'unknown')
             }
             metadatas.append(metadata)
             embeddings_list.append(embeddings[idx])
