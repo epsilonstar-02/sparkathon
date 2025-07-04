@@ -1,3 +1,4 @@
+
 # Walmart AI Shopping Assistant Backend
 
 FastAPI backend with PostgreSQL and Prisma for the Personalized AI Shopping Assistant.

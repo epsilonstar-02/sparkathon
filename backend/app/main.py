@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import os
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+
 
 from .database import get_db, disconnect_prisma
 from .schemas import (
@@ -34,15 +36,27 @@ app.add_middleware(
 )
 
 # Startup and shutdown events
-@app.on_event("startup")
-async def startup():
-    """Initialize database connection on startup."""
-    await get_db()
+# @app.on_event("startup")
+# async def startup():
+#     """Initialize database connection on startup."""
+#     await get_db()
 
-@app.on_event("shutdown")
-async def shutdown():
-    """Close database connection on shutdown."""
+# @app.on_event("shutdown")
+# async def shutdown():
+#     """Close database connection on shutdown."""
+#     await disconnect_prisma()
+
+#new added 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Runs on startup
+    await get_db()
+    yield
+    # Runs on shutdown
     await disconnect_prisma()
+
+app = FastAPI(lifespan=lifespan)
+
 
 # Health check
 @app.get("/health")
