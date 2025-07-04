@@ -49,7 +49,7 @@ export const analyticsService = {
     }
   },
 
-  // Get top purchased products
+  // Get top purchased products with enhanced data
   // USAGE: Dashboard.jsx for top purchases section
   // INTEGRATION POINT: Dashboard component - top purchases widget
   async getTopPurchases(userId, limit = 5) {
@@ -63,7 +63,7 @@ export const analyticsService = {
     }
   },
 
-  // Get shopping patterns
+  // Get shopping patterns with brand analysis
   // USAGE: Dashboard.jsx for shopping behavior insights
   // INTEGRATION POINT: Dashboard component - shopping patterns section
   async getShoppingPatterns(userId) {
@@ -77,6 +77,20 @@ export const analyticsService = {
       return patterns
     } catch (error) {
       console.error('Failed to fetch shopping patterns:', error)
+      throw error
+    }
+  },
+
+  // Get brand loyalty analytics
+  // USAGE: Dashboard.jsx for brand preference insights
+  // INTEGRATION POINT: Dashboard component - brand analytics section
+  async getBrandAnalytics(userId) {
+    try {
+      const orders = await userService.getUserOrders(userId)
+      const brandData = this.analyzeBrandPreferences(orders)
+      return brandData
+    } catch (error) {
+      console.error('Failed to fetch brand analytics:', error)
       throw error
     }
   },
@@ -108,10 +122,11 @@ export const analyticsService = {
     return trends
   },
 
-  // Process top purchases from orders
+  // Process top purchases from orders with enhanced product data
   processTopPurchases(orders, limit) {
     const productCounts = {}
     const productTotals = {}
+    const productDetails = {}
 
     orders.forEach(order => {
       if (Array.isArray(order.items)) {
@@ -122,6 +137,16 @@ export const analyticsService = {
 
           productCounts[productId] = (productCounts[productId] || 0) + quantity
           productTotals[productId] = (productTotals[productId] || 0) + (price * quantity)
+          
+          // Store product details from order item
+          if (!productDetails[productId]) {
+            productDetails[productId] = {
+              name: item.name || `Product ${productId}`,
+              brand: item.brand || 'Unknown',
+              thumbnailUrl: item.thumbnailUrl || null,
+              price: item.price || 0
+            }
+          }
         })
       }
     })
@@ -131,7 +156,7 @@ export const analyticsService = {
         productId,
         count,
         total: productTotals[productId] || 0,
-        name: `Product ${productId}` // This would be replaced with actual product names
+        ...productDetails[productId]
       }))
       .sort((a, b) => b.count - a.count)
       .slice(0, limit)
@@ -139,7 +164,38 @@ export const analyticsService = {
     return topProducts
   },
 
-  // Analyze shopping patterns
+  // Analyze brand preferences from orders
+  analyzeBrandPreferences(orders) {
+    const brandCounts = {}
+    const brandTotals = {}
+
+    orders.forEach(order => {
+      if (Array.isArray(order.items)) {
+        order.items.forEach(item => {
+          const brand = item.brand || 'Unknown'
+          const quantity = item.quantity || 1
+          const price = item.price || 0
+          const total = price * quantity
+
+          brandCounts[brand] = (brandCounts[brand] || 0) + quantity
+          brandTotals[brand] = (brandTotals[brand] || 0) + total
+        })
+      }
+    })
+
+    const brandAnalytics = Object.entries(brandCounts)
+      .map(([brand, count]) => ({
+        brand,
+        count,
+        total: brandTotals[brand] || 0,
+        averagePrice: brandTotals[brand] / count
+      }))
+      .sort((a, b) => b.total - a.total)
+
+    return brandAnalytics
+  },
+
+  // Analyze shopping patterns with enhanced insights
   analyzeShoppingPatterns(orders, user) {
     const patterns = {
       averageOrderValue: orders.length > 0 
@@ -147,8 +203,10 @@ export const analyticsService = {
         : 0,
       orderFrequency: this.calculateOrderFrequency(orders),
       preferredCategories: this.getPreferredCategories(orders),
+      preferredBrands: this.getPreferredBrands(orders),
       shoppingTimes: this.analyzeShoppingTimes(orders),
-      seasonalTrends: this.analyzeSeasonalTrends(orders)
+      seasonalTrends: this.analyzeSeasonalTrends(orders),
+      averageRatingPreference: this.analyzeRatingPreferences(orders)
     }
 
     return patterns
@@ -187,6 +245,44 @@ export const analyticsService = {
       .sort(([,a], [,b]) => b - a)
       .slice(0, 5)
       .map(([category, total]) => ({ category, total }))
+  },
+
+  // Get preferred brands from orders
+  getPreferredBrands(orders) {
+    const brandTotals = {}
+    
+    orders.forEach(order => {
+      if (Array.isArray(order.items)) {
+        order.items.forEach(item => {
+          const brand = item.brand || 'Unknown'
+          brandTotals[brand] = (brandTotals[brand] || 0) + (item.price * item.quantity)
+        })
+      }
+    })
+    
+    return Object.entries(brandTotals)
+      .sort(([,a], [,b]) => b - a)
+      .slice(0, 5)
+      .map(([brand, total]) => ({ brand, total }))
+  },
+
+  // Analyze rating preferences
+  analyzeRatingPreferences(orders) {
+    let totalRating = 0
+    let ratedItemsCount = 0
+
+    orders.forEach(order => {
+      if (Array.isArray(order.items)) {
+        order.items.forEach(item => {
+          if (item.averageRating) {
+            totalRating += item.averageRating
+            ratedItemsCount++
+          }
+        })
+      }
+    })
+
+    return ratedItemsCount > 0 ? totalRating / ratedItemsCount : 0
   },
 
   // Analyze shopping times

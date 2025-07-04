@@ -93,5 +93,83 @@ export const productService = {
       console.error(`Failed to fetch products by aisle ${aisle}:`, error)
       throw error
     }
+  },
+
+  // Search products by brand
+  // USAGE: Filter products by brand in search functionality
+  // INTEGRATION POINT: Search components - brand filtering
+  async getProductsByBrand(brand) {
+    try {
+      const products = await this.getAllProducts()
+      return products.filter(product => 
+        product.brand && product.brand.toLowerCase().includes(brand.toLowerCase())
+      )
+    } catch (error) {
+      console.error(`Failed to fetch products by brand ${brand}:`, error)
+      throw error
+    }
+  },
+
+  // Get products by availability status
+  // USAGE: Filter products by stock status
+  // INTEGRATION POINT: Inventory management or product display
+  async getProductsByAvailability(availability) {
+    try {
+      const products = await this.getAllProducts()
+      return products.filter(product => 
+        product.availability === availability
+      )
+    } catch (error) {
+      console.error(`Failed to fetch products by availability ${availability}:`, error)
+      throw error
+    }
+  },
+
+  // Search products by name or description
+  // USAGE: General product search functionality
+  // INTEGRATION POINT: Search bar in any component
+  async searchProducts(searchTerm) {
+    try {
+      const products = await this.getAllProducts()
+      const term = searchTerm.toLowerCase()
+      return products.filter(product => 
+        product.name.toLowerCase().includes(term) ||
+        (product.shortDescription && product.shortDescription.toLowerCase().includes(term)) ||
+        (product.brand && product.brand.toLowerCase().includes(term))
+      )
+    } catch (error) {
+      console.error(`Failed to search products with term ${searchTerm}:`, error)
+      throw error
+    }
+  },
+
+  // Get products with ratings above threshold
+  // USAGE: Filter high-rated products
+  // INTEGRATION POINT: Product recommendations or quality filters
+  async getHighRatedProducts(minRating = 4.0) {
+    try {
+      const products = await this.getAllProducts()
+      return products.filter(product => 
+        product.averageRating && product.averageRating >= minRating
+      )
+    } catch (error) {
+      console.error(`Failed to fetch high-rated products:`, error)
+      throw error
+    }
+  },
+
+  // Get products within price range
+  // USAGE: Price-based filtering
+  // INTEGRATION POINT: Price filter components
+  async getProductsByPriceRange(minPrice, maxPrice) {
+    try {
+      const products = await this.getAllProducts()
+      return products.filter(product => 
+        product.price >= minPrice && product.price <= maxPrice
+      )
+    } catch (error) {
+      console.error(`Failed to fetch products by price range:`, error)
+      throw error
+    }
   }
 }

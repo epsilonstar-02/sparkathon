@@ -5,11 +5,15 @@ from datetime import datetime
 # Product schemas
 class ProductBase(BaseModel):
     name: str
+    brand: Optional[str] = None
+    averageRating: Optional[float] = None
+    shortDescription: Optional[str] = None
+    thumbnailUrl: Optional[str] = None
     price: float
-    description: str
+    currencyUnit: str = "USD"
     category: str
-    inStock: bool
     aisle: str
+    availability: str = "in-stock"
 
 class ProductCreate(ProductBase):
     pass

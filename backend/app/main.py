@@ -219,7 +219,7 @@ async def create_order(order: OrderCreate, db=Depends(get_db)):
         if not product:
             raise HTTPException(status_code=404, detail=f"Product {item.productId} not found")
         
-        if not product.inStock:
+        if product.availability == "out-of-stock":
             raise HTTPException(status_code=400, detail=f"Product {product.name} is out of stock")
         
         item_total = product.price * item.quantity
@@ -229,7 +229,10 @@ async def create_order(order: OrderCreate, db=Depends(get_db)):
             "productId": item.productId,
             "quantity": item.quantity,
             "price": product.price,
-            "name": product.name
+            "name": product.name,
+            "brand": product.brand,
+            "thumbnailUrl": product.thumbnailUrl,
+            "currencyUnit": product.currencyUnit
         })
     
     # Create order

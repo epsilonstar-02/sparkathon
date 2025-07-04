@@ -80,14 +80,19 @@ async def load_products_from_csv():
     products_created = 0
     for _, row in df.iterrows():
         try:
+            # Handle the new CSV structure with all columns
             await db.product.create(
                 data={
                     "name": row["name"],
+                    "brand": row["brand"] if pd.notna(row["brand"]) else None,
+                    "averageRating": float(row["averageRating"]) if pd.notna(row["averageRating"]) else None,
+                    "shortDescription": row["shortDescription"] if pd.notna(row["shortDescription"]) else None,
+                    "thumbnailUrl": row["thumbnailUrl"] if pd.notna(row["thumbnailUrl"]) else None,
                     "price": float(row["price"]),
-                    "description": row["description"],
+                    "currencyUnit": row["currencyUnit"] if pd.notna(row["currencyUnit"]) else "USD",
                     "category": row["category"],
-                    "inStock": row["inStock"].lower() == "true",
-                    "aisle": row["aisle"]
+                    "aisle": row["aisle"],
+                    "availability": row["availability"] if pd.notna(row["availability"]) else "in-stock"
                 }
             )
             products_created += 1
@@ -161,14 +166,35 @@ async def create_sample_data(user_id: str):
     sample_orders = [
         {
             "items": [
-                {"productId": products[0].id, "quantity": 2, "price": products[0].price, "name": products[0].name},
-                {"productId": products[1].id, "quantity": 1, "price": products[1].price, "name": products[1].name}
+                {
+                    "productId": products[0].id, 
+                    "quantity": 2, 
+                    "price": products[0].price, 
+                    "name": products[0].name,
+                    "brand": products[0].brand,
+                    "thumbnailUrl": products[0].thumbnailUrl
+                },
+                {
+                    "productId": products[1].id, 
+                    "quantity": 1, 
+                    "price": products[1].price, 
+                    "name": products[1].name,
+                    "brand": products[1].brand,
+                    "thumbnailUrl": products[1].thumbnailUrl
+                }
             ],
             "total": products[0].price * 2 + products[1].price
         },
         {
             "items": [
-                {"productId": products[2].id, "quantity": 3, "price": products[2].price, "name": products[2].name}
+                {
+                    "productId": products[2].id, 
+                    "quantity": 3, 
+                    "price": products[2].price, 
+                    "name": products[2].name,
+                    "brand": products[2].brand,
+                    "thumbnailUrl": products[2].thumbnailUrl
+                }
             ],
             "total": products[2].price * 3
         }
