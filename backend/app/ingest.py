@@ -3,11 +3,12 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 from .database import get_prisma
+import json
 
-# Load environment variables
+
 load_dotenv()
 
-# Demo user profile data
+
 DEMO_USER_PROFILE = {
     "user_id": "david123",
     "name": "David",
@@ -65,22 +66,22 @@ async def load_products_from_csv():
     """Load products from CSV file into database."""
     print("Loading products from CSV...")
     
-    # Read CSV file
+    
     csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "products.csv")
     df = pd.read_csv(csv_path)
     
-    # Get database connection
+   
     db = await get_prisma()
     
-    # Clear existing products
+   
     await db.product.delete_many()
     print("Cleared existing products")
     
-    # Insert products
+    
     products_created = 0
     for _, row in df.iterrows():
         try:
-            # Handle the new CSV structure with all columns
+         
             await db.product.create(
                 data={
                     "name": row["name"],
@@ -108,7 +109,7 @@ async def create_demo_user():
     
     db = await get_prisma()
     
-    # Check if demo user already exists
+   
     existing_user = await db.user.find_unique(where={"email": "david@example.com"})
     if existing_user:
         print("Demo user already exists, updating profile...")
@@ -116,20 +117,24 @@ async def create_demo_user():
             where={"id": existing_user.id},
             data={
                 "name": "David",
-                "profile": DEMO_USER_PROFILE
+                "profile": json.dumps(DEMO_USER_PROFILE)
             }
         )
         return existing_user.id
     
-    # Create new demo user
+    
     demo_user = await db.user.create(
         data={
             "name": "David",
             "email": "david@example.com",
-            "profile": DEMO_USER_PROFILE
+            "profile": json.dumps(DEMO_USER_PROFILE)
         }
     )
     
+   
+    profile_data = demo_user.profile
+    print(f"Demo user created with ID: {profile_data}")
+
     print(f"Created demo user with ID: {demo_user.id}")
     return demo_user.id
 
@@ -139,18 +144,18 @@ async def create_sample_data(user_id: str):
     
     db = await get_prisma()
     
-    # Get some products for sample data
+    
     products = await db.product.find_many(take=5)
     if not products:
         print("No products found, skipping sample data creation")
         return
     
-    # Clear existing shopping list and orders for demo user
+    
     await db.shoppinglistitem.delete_many(where={"userId": user_id})
     await db.order.delete_many(where={"userId": user_id})
     await db.chatmessage.delete_many(where={"userId": user_id})
     
-    # Create sample shopping list
+    
     for i, product in enumerate(products[:3]):
         await db.shoppinglistitem.create(
             data={
@@ -162,7 +167,7 @@ async def create_sample_data(user_id: str):
     
     print("Created sample shopping list")
     
-    # Create sample orders
+    
     sample_orders = [
         {
             "items": [
@@ -204,14 +209,14 @@ async def create_sample_data(user_id: str):
         await db.order.create(
             data={
                 "userId": user_id,
-                "items": order_data["items"],
+                "items": json.dumps(order_data["items"]),
                 "total": order_data["total"]
             }
         )
     
     print("Created sample orders")
     
-    # Create sample chat messages
+    
     sample_messages = [
         {"content": "Hi, I need help planning my groceries.", "isUser": True},
         {"content": "Of course! What meals are you planning this week?", "isUser": False},
@@ -235,13 +240,12 @@ async def main():
     print("Starting data ingestion...")
     
     try:
-        # Load products
-        await load_products_from_csv()
         
-        # Create demo user
+        
+        
         user_id = await create_demo_user()
         
-        # Create sample data
+       
         await create_sample_data(user_id)
         
         print("Data ingestion completed successfully!")
@@ -251,7 +255,7 @@ async def main():
         raise
     
     finally:
-        # Disconnect from database
+       
         from .database import disconnect_prisma
         await disconnect_prisma()
 
