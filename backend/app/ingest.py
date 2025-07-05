@@ -241,7 +241,7 @@ async def main():
     
     try:
         
-        
+        await load_products_from_csv()
         
         user_id = await create_demo_user()
         
