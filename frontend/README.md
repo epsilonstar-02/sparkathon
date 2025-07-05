@@ -124,7 +124,7 @@ npm install react-router-dom@^7.6.3
 npm install recharts@^3.0.2
 npm install three@^0.178.0
 
-
+```
 ## 📱 Application Structure
 
 ```
