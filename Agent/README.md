@@ -1,13 +1,94 @@
-# Product Data Ingestion System
+# ChromaDB Vector Database for Product RAG
 
-This project processes Walmart product data and creates both vector and SQL databases for efficient search and retrieval.
+A production-ready ChromaDB setup for ingesting product data and enabling Retrieval-Augmented Generation (RAG) applications.
 
-## Features
+## Overview
 
-- **Vector Database**: ChromaDB with semantic search capabilities using all-MiniLM-L6-v2 embeddings
-- **SQL Database**: SQLite for structured data queries and filtering
-- **Category Filtering**: ChromaDB metadata includes categories for efficient filtering
-- **Batch Processing**: Efficient processing of large datasets
+This system provides semantic search capabilities for product data using ChromaDB vector embeddings, designed to complement your PostgreSQL backend for RAG applications.
+
+- **PostgreSQL** (backend): Structured data, transactions, user management
+- **ChromaDB** (Agent): Vector embeddings, semantic search, RAG context
+
+## Quick Start
+
+### 1. Install Dependencies
+```bash
+cd Agent
+uv sync
+```
+
+### 2. Ingest Products
+```bash
+uv run python ingest_products.py
+```
+
+### 3. Test Search
+```bash
+uv run python query_products.py
+```
+
+### 4. Test RAG
+```bash
+uv run python rag_demo.py
+```
+
+## Files
+
+- `ingest_products.py` - Ingests products into ChromaDB with embeddings
+- `query_products.py` - Interactive search interface
+- `rag_demo.py` - RAG workflow demonstration
+- `chroma_db/` - Vector database (created after ingestion)
+
+## Usage
+
+### Search Products
+```python
+from query_products import ProductSearcher
+
+searcher = ProductSearcher()
+results = searcher.search("gaming console", n_results=5)
+```
+
+### RAG Integration
+```python
+from rag_demo import ProductRAG
+
+rag = ProductRAG()
+context = rag.retrieve_context("gaming console for kids")
+prompt = rag.generate_response_prompt("gaming console for kids", context)
+# Send prompt to your LLM API
+```
+
+### Backend Integration
+```python
+# In your FastAPI routes
+from Agent.query_products import ProductSearcher
+
+searcher = ProductSearcher("../Agent/chroma_db")
+
+@app.get("/api/search/semantic")
+async def semantic_search(query: str):
+    results = searcher.search(query, n_results=10)
+    return {"products": results}
+```
+
+## Data Structure
+
+Each product contains:
+- **Text**: Combined product name, brand, category, description
+- **Metadata**: ID, category, brand, price, rating, availability
+
+## Integration Architecture
+
+```
+User Query → ChromaDB Search → Retrieve Context → LLM Prompt → Response
+```
+
+## Performance
+
+- Ingestion: ~1 minute for 694 products
+- Search: <1 second per query
+- Model: `all-MiniLM-L6-v2` embeddings
 
 ## Setup and Installation
 
