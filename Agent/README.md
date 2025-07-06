@@ -1,157 +1,260 @@
-# ChromaDB Vector Database for Product RAG
+# Walmart Shopping Assistant Agent
 
-A production-ready ChromaDB setup for ingesting product data and enabling Retrieval-Augmented Generation (RAG) applications.
+A sophisticated LangGraph-powered AI shopping assistant that provides personalized shopping experiences for Walmart customers using RAG (Retrieval-Augmented Generation) and advanced reasoning capabilities.
 
-## Overview
+## 🏗️ Architecture
 
-This system provides semantic search capabilities for product data using ChromaDB vector embeddings, designed to complement your PostgreSQL backend for RAG applications.
+The assistant is built using:
+- **LangGraph**: For complex workflow orchestration and multi-step reasoning
+- **ChromaDB**: For semantic product search and RAG capabilities
+- **FastAPI**: For backend integration and API endpoints
+- **Gemini**: For natural language understanding and generation
 
-- **PostgreSQL** (backend): Structured data, transactions, user management
-- **ChromaDB** (Agent): Vector embeddings, semantic search, RAG context
+## 🚀 Features
 
-## Quick Start
+### Core Capabilities
+- **Intelligent Product Discovery**: Semantic search through Walmart's product catalog
+- **Personalized Recommendations**: Based on user preferences, dietary restrictions, and budget
+- **Shopping List Management**: Add, remove, and optimize shopping lists
+- **Meal Planning**: Generate weekly meal plans with shopping lists
+- **Budget Optimization**: Suggest alternatives and optimize costs
+- **Nutrition Analysis**: Analyze nutritional balance of shopping choices
+- **Multi-turn Conversations**: Maintain context across chat sessions
 
-### 1. Install Dependencies
+### Advanced Workflows
+- **Intent Classification**: Understand what users want (product search, meal planning, etc.)
+- **Multi-step Reasoning**: Complex decision making across multiple nodes
+- **Tool Integration**: Seamless integration with backend APIs and databases
+- **Preference Learning**: Adapt to user preferences over time
+
+## 📁 Project Structure
+
+```
+Agent/
+├── shopping_assistant.py      # Core LangGraph agent implementation
+├── shopping_tools.py          # Tools for backend/RAG integration
+├── config.py                  # Configuration and settings
+├── agent_api.py               # FastAPI wrapper for frontend integration
+├── query_products.py          # ChromaDB product search utilities
+├── ingest_products.py         # Data ingestion for ChromaDB
+├── pyproject.toml             # Dependencies and project metadata
+├── uv.lock                    # Dependency lock file
+├── requirements.txt           # Python dependencies
+├── README.md                  # This documentation
+├── .env                       # Environment variables (create this)
+├── .gitignore                 # Git ignore rules
+└── chroma_db/                 # ChromaDB vector database
+```
+
+## 🛠️ Setup and Installation
+
+### Prerequisites
+- Python 3.12+
+- GEMINI API key
+- Access to the backend API (FastAPI + PostgreSQL)
+- ChromaDB with ingested product data
+
+### Installation
+
+1. **Install dependencies using uv:**
 ```bash
 cd Agent
 uv sync
 ```
 
-### 2. Ingest Products
+2. **Set up environment variables:**
+Create a `.env` file in the Agent directory:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+BACKEND_BASE_URL=http://localhost:8000
+CHROMA_PERSIST_DIRECTORY=./chroma_db
+```
+
+3. **Initialize ChromaDB with product data:**
 ```bash
 uv run python ingest_products.py
 ```
 
-### 3. Test Search
+## 🎯 Usage
+
+
+### API Interface
+
+Start the FastAPI server for frontend integration:
+
 ```bash
-uv run python query_products.py
+uv run python agent_api.py
 ```
 
-### 4. Test RAG
-```bash
-uv run python rag_demo.py
-```
+The API will be available at:
+- **Base URL**: `http://localhost:8001`
+- **Interactive docs**: `http://localhost:8001/docs`
 
-## Files
+**Key endpoints:**
+- `POST /chat` - Main chat interface
+- `GET /user/{user_id}/profile` - Get user profile
+- `GET /user/{user_id}/shopping-list` - Get shopping list
+- `POST /meal-plan/generate` - Generate meal plans
+- `GET /search/products` - Search products
 
-- `ingest_products.py` - Ingests products into ChromaDB with embeddings
-- `query_products.py` - Interactive search interface
-- `rag_demo.py` - RAG workflow demonstration
-- `chroma_db/` - Vector database (created after ingestion)
 
-## Usage
+## 🧠 Agent Architecture
 
-### Search Products
+### State Schema
+The agent maintains rich state throughout the conversation:
+
 ```python
-from query_products import ProductSearcher
-
-searcher = ProductSearcher()
-results = searcher.search("gaming console", n_results=5)
+class ShoppingAssistantState(TypedDict):
+    # User context
+    user_id: str
+    user_profile: Dict[str, Any]
+    chat_history: List[Dict[str, Any]]
+    current_message: str
+    
+    # Shopping context
+    shopping_list: List[Dict[str, Any]]
+    current_intent: str
+    search_query: str
+    retrieved_products: List[Dict[str, Any]]
+    
+    # Agent reasoning
+    agent_thoughts: List[str]
+    reasoning_step: str
+    recommendations: List[Dict[str, Any]]
+    
+    # Task execution
+    actions_taken: List[str]
+    api_responses: List[Dict[str, Any]]
+    final_response: str
 ```
 
-### RAG Integration
-```python
-from rag_demo import ProductRAG
+### Workflow Graph
+The agent uses a multi-node workflow:
 
-rag = ProductRAG()
-context = rag.retrieve_context("gaming console for kids")
-prompt = rag.generate_response_prompt("gaming console for kids", context)
-# Send prompt to your LLM API
+1. **Analyze Intent** → Classify user intent and extract key information
+2. **Discover Products** → Search ChromaDB for relevant products
+3. **Execute Actions** → Perform intent-specific actions (add to list, get analytics)
+4. **Generate Recommendations** → Create personalized suggestions
+5. **Formulate Response** → Generate natural language response
+
+### Available Tools
+- `search_products_semantic` - Semantic product search
+- `get_user_shopping_list` - Retrieve shopping list
+- `add_product_to_list` - Add items to shopping list
+- `get_user_preferences` - Get user profile
+- `get_spending_breakdown` - Analytics and insights
+- `generate_meal_plan_suggestions` - Meal planning
+- `analyze_nutrition_profile` - Nutrition analysis
+- `find_product_alternatives` - Product comparisons
+- `optimize_shopping_list_for_budget` - Budget optimization
+
+## 🔄 Integration with Backend
+
+The agent integrates seamlessly with the existing FastAPI backend:
+
+
+### Database Integration
+The agent works with your existing:
+- User profiles and preferences
+- Shopping lists and history
+- Product catalog and pricing
+- Order history and analytics
+
+## 🎨 Frontend Integration
+
+### React Frontend
+The agent API is designed to work with the existing React frontend:
+
+
+### WebSocket Support (Future)
+For real-time chat experiences, WebSocket support can be added to the API.
+
+
+## API Testing
+Use the FastAPI docs interface at `http://localhost:8001/docs` for API testing.
+
+## 🔧 Configuration
+
+### Environment Variables
+```env
+# Required
+GEMINI_API_KEY=your_gemini_api_key
+
+# Optional (with defaults)
+BACKEND_BASE_URL=http://localhost:8000
+CHROMA_PERSIST_DIRECTORY=./chroma_db
+GEMINI_API_KEY=your_gemini_api_key
+DEFAULT_TEMPERATURE=0.7
+MAX_PRODUCTS_TO_RETRIEVE=10
 ```
 
-### Backend Integration
-```python
-# In your FastAPI routes
-from Agent.query_products import ProductSearcher
+### Customization
+Modify `config.py` to adjust:
+- Agent personality and prompts
+- Search parameters
+- Model settings
+- API endpoints
 
-searcher = ProductSearcher("../Agent/chroma_db")
+## 📊 Performance Considerations
 
-@app.get("/api/search/semantic")
-async def semantic_search(query: str):
-    results = searcher.search(query, n_results=10)
-    return {"products": results}
+- **Caching**: ChromaDB provides efficient vector caching
+- **Async**: All operations are asynchronous for better performance
+- **Streaming**: Supports streaming responses for real-time UX
+- **Rate Limiting**: Built-in Gemini rate limiting handling
+
+## 🚀 Deployment
+
+### Production Deployment
+1. Set up environment variables
+2. Deploy ChromaDB with product data
+3. Configure backend API endpoints
+4. Deploy the agent API using Docker or cloud services
+
+### Docker Deployment
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY . .
+RUN pip install uv && uv sync
+CMD ["uv", "run", "python", "agent_api.py"]
 ```
 
-## Data Structure
+## 📄 License
 
-Each product contains:
-- **Text**: Combined product name, brand, category, description
-- **Metadata**: ID, category, brand, price, rating, availability
+This project is part of the Walmart Sparkathon submission.
 
-## Integration Architecture
+## 🆘 Troubleshooting
 
-```
-User Query → ChromaDB Search → Retrieve Context → LLM Prompt → Response
-```
+### Common Issues
 
-## Performance
-
-- Ingestion: ~1 minute for 694 products
-- Search: <1 second per query
-- Model: `all-MiniLM-L6-v2` embeddings
-
-## Setup and Installation
-
-### Prerequisites
-- Python 3.12+
-- UV package manager
-
-### Installation
-
-1. Install dependencies using UV:
+**ChromaDB not initialized:**
 ```bash
-uv sync
+uv run python ingest_products.py
 ```
 
-2. Run the data ingestion:
+**Missing Gemini API key:**
 ```bash
-uv run python ingest.py
+export GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-## What the Script Does
+**Backend API not accessible:**
+- Check backend is running on correct port
+- Verify `BACKEND_BASE_URL` in config
 
-The `ingest.py` script will:
+**Agent not responding:**
+- Check Gemini API key validity and quota
+- Ensure all dependencies are installed (`uv sync`)
+- Review error logs in the console for stack traces
+- Confirm backend and ChromaDB services are running
+- Verify network connectivity between agent and backend
 
-1. **Load Data**: Read `Walmart_data_cleaned.csv` containing product information
-2. **Clean Data**: Handle missing values and validate required fields
-3. **Generate Embeddings**: Create vector embeddings using the all-MiniLM-L6-v2 model from Hugging Face
-4. **Populate SQL Database**: Create `walmart_products.db` with structured product data
-5. **Populate Vector Database**: Create `chroma_db/` directory with semantic embeddings
-6. **Verify**: Ensure both databases are properly populated
+### Getting Help
 
-## Output Files
+For issues with the agent:
+1. Check the error logs in the console
+2. Verify all environment variables are set
+3. Check the ChromaDB data is properly ingested
 
-After running `python ingest.py`, you'll have:
+---
 
-- `walmart_products.db` - SQLite database with product information
-- `chroma_db/` - ChromaDB directory with vector embeddings
-
-## Database Schema
-
-### SQLite (`walmart_products.db`)
-- **products** table with columns:
-  - id, keyword, page, position, type, name, brand
-  - average_rating, short_description, thumbnail_url
-  - price, currency_unit, created_at
-
-### ChromaDB (`chroma_db/`)
-- **Collection**: `walmart_products`
-- **Metadata**: Includes category, brand, name, price, rating for efficient filtering
-- **Documents**: Combined product information for semantic search
-
-## Usage in API
-
-The databases are ready for use in an API server that can:
-- Perform semantic search using ChromaDB
-- Filter by category directly in ChromaDB metadata
-- Query structured data using SQLite
-- Combine both for hybrid search capabilities
-
-## Categories Available
-
-The dataset includes products from categories like:
-- Canned & Jarred Foods (Beans, Meats, Vegetables)
-- Electronics (Tablets, Cell Phones, Laptops)
-- Furniture (Sofas, Loveseats, Sectionals)
-- Gaming (Video Game Consoles, Handheld Games)
-- Appliances (Refrigerators, Ceiling Fans)
+**Built with ❤️ for Walmart Sparkathon 2025**
