@@ -14,21 +14,29 @@ from datetime import datetime
 import json
 import asyncio
 
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
-from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
+# Set up comprehensive logging for the shopping assistant
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('shopping_assistant.log', encoding='utf-8')
+    ]
+)
 
-# Set up logging for LLM API calls
-logger = logging.getLogger("llm_api_calls")
-logger.setLevel(logging.INFO)
+# Create specific loggers for different components
+logger = logging.getLogger("ShoppingAssistant")
+tool_logger = logging.getLogger("ToolUsage")
+api_logger = logging.getLogger("BackendAPI")
+
+# Set up logging for LLM API calls (existing)
+llm_logger = logging.getLogger("llm_api_calls")
+llm_logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 handler.setFormatter(formatter)
-if not logger.hasHandlers():
-    logger.addHandler(handler)
+if not llm_logger.hasHandlers():
+    llm_logger.addHandler(handler)
 from pydantic import BaseModel, Field
 
 # Import our existing components
@@ -50,6 +58,28 @@ from shopping_tools import (
     optimize_shopping_list_for_budget,
     api_client
 )
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+
+# Helper function to log tool usage
+def log_tool_usage(tool_name: str, params: Dict[str, Any], result: Any = None, error: str = None):
+    """Log tool usage with parameters and results."""
+    if error:
+        tool_logger.error(f"Tool '{tool_name}' failed with params {params}: {error}")
+    else:
+        tool_logger.info(f"Tool '{tool_name}' called with params: {params}")
+        if result:
+            # Log a summary of the result, not the full data to avoid log spam
+            if isinstance(result, list):
+                tool_logger.info(f"Tool '{tool_name}' returned {len(result)} items")
+            elif isinstance(result, dict):
+                tool_logger.info(f"Tool '{tool_name}' returned: {list(result.keys())}")
+            else:
+                tool_logger.info(f"Tool '{tool_name}' returned: {type(result).__name__}")
 
 # State schema for the agent
 class ShoppingAssistantState(TypedDict):
@@ -212,7 +242,9 @@ class WalmartShoppingAssistant:
         
         async def discover_products(state: ShoppingAssistantState) -> ShoppingAssistantState:
             """Use advanced tools to find and filter relevant products."""
-            state = self._add_thought(state, f"Searching for products: '{state['search_query']}'")
+            query = state['search_query']
+            logger.info(f"Starting product discovery for query: '{query}'")
+            state = self._add_thought(state, f"Searching for products: '{query}'")
             
             try:
                 # Get user preferences for filtering
@@ -220,24 +252,73 @@ class WalmartShoppingAssistant:
                 dietary_restrictions = user_preferences.get("dietary_restrictions", [])
                 budget_limit = user_preferences.get("budget_limit")
                 
+                logger.info(f"User preferences - Dietary: {dietary_restrictions}, Budget: {budget_limit}")
+                
                 # Perform semantic search using the tool (correct LangChain tool usage)
-                raw_products = await search_products_semantic.ainvoke({
-                    "query": state["search_query"],
+                search_params = {
+                    "query": query,
                     "max_results": Config.MAX_PRODUCTS_TO_RETRIEVE
-                })
+                }
+                try:
+                    raw_products = await search_products_semantic.ainvoke(search_params)
+                    log_tool_usage("search_products_semantic", search_params, raw_products)
+                    logger.info(f"Semantic search returned {len(raw_products)} products")
+                except Exception as e:
+                    log_tool_usage("search_products_semantic", search_params, error=str(e))
+                    logger.error(f"Semantic search failed: {e}")
+                    raw_products = []
                 
                 new_state = dict(state)
                 new_state["retrieved_products"] = raw_products
                 new_state = self._add_thought(new_state, f"Found {len(raw_products)} relevant products")
                 
                 # Apply dietary restrictions filtering
-                if dietary_restrictions:
-                    filtered_products = await filter_products_by_dietary_restrictions.ainvoke({
+                if dietary_restrictions and raw_products:
+                    filter_params = {
                         "products": raw_products, 
                         "restrictions": dietary_restrictions
-                    })
-                    new_state["retrieved_products"] = filtered_products
-                    new_state = self._add_thought(new_state, f"Filtered to {len(filtered_products)} products based on dietary preferences")
+                    }
+                    try:
+                        filtered_products = await filter_products_by_dietary_restrictions.ainvoke(filter_params)
+                        log_tool_usage("filter_products_by_dietary_restrictions", filter_params, filtered_products)
+                        new_state["retrieved_products"] = filtered_products
+                        new_state = self._add_thought(new_state, f"Filtered to {len(filtered_products)} products based on dietary preferences")
+                        logger.info(f"Applied dietary restrictions filter: {len(raw_products)} -> {len(filtered_products)} products")
+                    except Exception as e:
+                        log_tool_usage("filter_products_by_dietary_restrictions", filter_params, error=str(e))
+                        logger.error(f"Dietary filtering failed: {e}")
+                elif dietary_restrictions:
+                    logger.info("No products to filter for dietary restrictions")
+                
+                # Apply budget filtering if budget limit is specified
+                if budget_limit and new_state["retrieved_products"]:
+                    budget_params = {
+                        "products": new_state["retrieved_products"], 
+                        "budget_limit": budget_limit
+                    }
+                    try:
+                        budget_filtered = await filter_products_by_budget.ainvoke(budget_params)
+                        log_tool_usage("filter_products_by_budget", budget_params, budget_filtered)
+                        original_count = len(new_state["retrieved_products"])
+                        new_state["retrieved_products"] = budget_filtered
+                        new_state = self._add_thought(new_state, f"Filtered to {len(budget_filtered)} products within ${budget_limit} budget")
+                        logger.info(f"Applied budget filter: {original_count} -> {len(budget_filtered)} products within ${budget_limit}")
+                    except Exception as e:
+                        log_tool_usage("filter_products_by_budget", budget_params, error=str(e))
+                        logger.error(f"Budget filtering failed: {e}")
+                elif budget_limit:
+                    logger.info("No products to filter for budget limit")
+                
+                new_state["reasoning_step"] = "product_discovery"
+                logger.info(f"Product discovery completed. Final result: {len(new_state['retrieved_products'])} products")
+                return new_state
+                
+            except Exception as e:
+                logger.error(f"Error during product discovery: {e}")
+                new_state = dict(state)
+                new_state["retrieved_products"] = []
+                new_state = self._add_thought(new_state, f"Error during product search: {str(e)}")
+                return new_state
                 
                 # Apply budget filtering if specified
                 if budget_limit:
@@ -260,6 +341,7 @@ class WalmartShoppingAssistant:
         async def execute_actions(state: ShoppingAssistantState) -> ShoppingAssistantState:
             """Execute advanced actions based on intent using the tools."""
             intent = state.get("current_intent", "")
+            logger.info(f"Starting action execution for intent: {intent}")
             state = self._add_thought(state, f"Executing actions for intent: {intent}")
             
             try:
@@ -269,111 +351,182 @@ class WalmartShoppingAssistant:
                 
                 # Load user profile if not already loaded
                 if not state.get("user_profile"):
-                    user_profile = await get_user_preferences.ainvoke({"user_id": user_id})
-                    new_state["user_profile"] = user_profile
-                    actions_taken.append("Loaded user profile")
+                    logger.info(f"Loading user profile for user_id: {user_id}")
+                    tool_params = {"user_id": user_id}
+                    try:
+                        user_profile = await get_user_preferences.ainvoke(tool_params)
+                        log_tool_usage("get_user_preferences", tool_params, user_profile)
+                        new_state["user_profile"] = user_profile
+                        actions_taken.append("Loaded user profile from backend API")
+                        logger.info(f"Successfully loaded user profile: {list(user_profile.keys()) if user_profile else 'empty'}")
+                    except Exception as e:
+                        log_tool_usage("get_user_preferences", tool_params, error=str(e))
+                        actions_taken.append("Failed to load user profile from backend")
+                        logger.warning(f"Failed to load user profile: {e}")
                 
                 # Get current shopping list
-                current_shopping_list = await get_user_shopping_list.ainvoke({"user_id": user_id})
-                new_state["shopping_list"] = current_shopping_list
-                actions_taken.append("Retrieved current shopping list")
+                logger.info(f"Retrieving shopping list for user_id: {user_id}")
+                tool_params = {"user_id": user_id}
+                try:
+                    current_shopping_list = await get_user_shopping_list.ainvoke(tool_params)
+                    log_tool_usage("get_user_shopping_list", tool_params, current_shopping_list)
+                    new_state["shopping_list"] = current_shopping_list
+                    actions_taken.append(f"Retrieved shopping list ({len(current_shopping_list)} items)")
+                    logger.info(f"Successfully retrieved shopping list with {len(current_shopping_list)} items")
+                except Exception as e:
+                    log_tool_usage("get_user_shopping_list", tool_params, error=str(e))
+                    actions_taken.append("Failed to retrieve shopping list from backend")
+                    logger.warning(f"Failed to retrieve shopping list: {e}")
+                    new_state["shopping_list"] = []
                 
                 # Initialize recommendations if not present
                 if "recommendations" not in new_state:
                     new_state["recommendations"] = []
                 
-                # Intent-specific actions
+                # Intent-specific actions with enhanced logging
                 if intent in ["shopping_list_management"]:
+                    logger.info("Processing shopping list management intent")
                     # Check if user wants to add products
                     if any(keyword in state["current_message"].lower() 
                            for keyword in ["add", "put", "include", "need"]):
                         # Add recommended products to shopping list
-                        for product in state.get("retrieved_products", [])[:2]:  # Add top 2
+                        products_to_add = state.get("retrieved_products", [])[:2]  # Add top 2
+                        logger.info(f"Attempting to add {len(products_to_add)} products to shopping list")
+                        
+                        for product in products_to_add:
                             if product.get("id"):
-                                result = await add_product_to_list.ainvoke({
+                                tool_params = {
                                     "user_id": user_id, 
                                     "product_id": product["id"], 
                                     "quantity": 1
-                                })
-                                if result.get("success"):
-                                    actions_taken.append(f"Added {product.get('name', 'product')} to shopping list")
+                                }
+                                try:
+                                    result = await add_product_to_list.ainvoke(tool_params)
+                                    log_tool_usage("add_product_to_list", tool_params, result)
+                                    if result.get("success"):
+                                        actions_taken.append(f"Added {product.get('name', 'product')} to shopping list")
+                                        logger.info(f"Successfully added product {product.get('name')} to shopping list")
+                                    else:
+                                        logger.warning(f"Failed to add product {product.get('name')} to shopping list")
+                                except Exception as e:
+                                    log_tool_usage("add_product_to_list", tool_params, error=str(e))
+                                    logger.error(f"Error adding product to shopping list: {e}")
                 
                 elif intent in ["budget_analysis"]:
+                    logger.info("Processing budget analysis intent")
                     # Get spending analytics
-                    spending_data = await get_spending_breakdown.ainvoke({"user_id": user_id})
-                    if "api_responses" not in new_state:
-                        new_state["api_responses"] = []
-                    new_state["api_responses"].append({"spending_analytics": spending_data})
-                    actions_taken.append("Retrieved spending analytics")
+                    tool_params = {"user_id": user_id}
+                    try:
+                        spending_data = await get_spending_breakdown.ainvoke(tool_params)
+                        log_tool_usage("get_spending_breakdown", tool_params, spending_data)
+                        if "api_responses" not in new_state:
+                            new_state["api_responses"] = []
+                        new_state["api_responses"].append({"spending_analytics": spending_data})
+                        actions_taken.append("Retrieved spending analytics from backend")
+                        logger.info("Successfully retrieved spending analytics")
+                    except Exception as e:
+                        log_tool_usage("get_spending_breakdown", tool_params, error=str(e))
+                        logger.error(f"Failed to retrieve spending analytics: {e}")
                     
                     # Optimize shopping list if requested
                     if state.get("shopping_list"):
                         budget_limit = state.get("user_profile", {}).get("budget_limit", 100.0)
-                        optimized_list = await optimize_shopping_list_for_budget.ainvoke({
+                        tool_params = {
                             "shopping_list": state["shopping_list"], 
                             "budget_limit": budget_limit
-                        })
-                        new_state["recommendations"].append({
-                            "type": "budget_optimization",
-                            "optimized_list": optimized_list,
-                            "reason": f"Optimized for ${budget_limit} budget"
-                        })
-                        actions_taken.append("Generated budget-optimized shopping list")
+                        }
+                        try:
+                            optimized_list = await optimize_shopping_list_for_budget.ainvoke(tool_params)
+                            log_tool_usage("optimize_shopping_list_for_budget", tool_params, optimized_list)
+                            new_state["recommendations"].append({
+                                "type": "budget_optimization",
+                                "optimized_list": optimized_list,
+                                "reason": f"Optimized for ${budget_limit} budget"
+                            })
+                            actions_taken.append("Generated budget-optimized shopping list")
+                            logger.info(f"Successfully optimized shopping list for ${budget_limit} budget")
+                        except Exception as e:
+                            log_tool_usage("optimize_shopping_list_for_budget", tool_params, error=str(e))
+                            logger.error(f"Failed to optimize shopping list: {e}")
                 
                 elif intent in ["meal_planning"]:
+                    logger.info("Processing meal planning intent")
                     # Generate meal plan
                     dietary_prefs = state.get("user_profile", {}).get("dietary_restrictions", [])
                     budget = state.get("user_profile", {}).get("budget_limit", 100.0)
                     
-                    meal_plan = await generate_meal_plan_suggestions.ainvoke({
+                    tool_params = {
                         "dietary_preferences": dietary_prefs, 
                         "budget": budget, 
                         "days": 7
-                    })
-                    new_state["recommendations"].append({
-                        "type": "meal_plan",
-                        "meal_suggestions": meal_plan,
-                        "reason": "Personalized meal plan based on your preferences"
-                    })
-                    actions_taken.append("Generated personalized meal plan")
+                    }
+                    try:
+                        meal_plan = await generate_meal_plan_suggestions.ainvoke(tool_params)
+                        log_tool_usage("generate_meal_plan_suggestions", tool_params, meal_plan)
+                        new_state["recommendations"].append({
+                            "type": "meal_plan",
+                            "meal_suggestions": meal_plan,
+                            "reason": "Personalized meal plan based on your preferences"
+                        })
+                        actions_taken.append("Generated personalized meal plan")
+                        logger.info(f"Successfully generated meal plan for {len(dietary_prefs)} dietary preferences")
+                    except Exception as e:
+                        log_tool_usage("generate_meal_plan_suggestions", tool_params, error=str(e))
+                        logger.error(f"Failed to generate meal plan: {e}")
                 
                 elif intent in ["nutrition_analysis"]:
+                    logger.info("Processing nutrition analysis intent")
                     # Analyze nutrition of current shopping list or products
                     items_to_analyze = state.get("retrieved_products", []) or state.get("shopping_list", [])
                     if items_to_analyze:
-                        nutrition_analysis = await analyze_nutrition_profile.ainvoke({
-                            "products": items_to_analyze
-                        })
-                        new_state["recommendations"].append({
-                            "type": "nutrition_analysis",
-                            "analysis": nutrition_analysis,
-                            "reason": "Nutritional breakdown of your selected items"
-                        })
-                        actions_taken.append("Analyzed nutritional profile")
+                        tool_params = {"products": items_to_analyze}
+                        try:
+                            nutrition_analysis = await analyze_nutrition_profile.ainvoke(tool_params)
+                            log_tool_usage("analyze_nutrition_profile", tool_params, nutrition_analysis)
+                            new_state["recommendations"].append({
+                                "type": "nutrition_analysis",
+                                "analysis": nutrition_analysis,
+                                "reason": "Nutritional breakdown of your selected items"
+                            })
+                            actions_taken.append(f"Analyzed nutritional profile of {len(items_to_analyze)} items")
+                            logger.info(f"Successfully analyzed nutrition for {len(items_to_analyze)} items")
+                        except Exception as e:
+                            log_tool_usage("analyze_nutrition_profile", tool_params, error=str(e))
+                            logger.error(f"Failed to analyze nutrition: {e}")
                 
                 elif intent in ["comparison"]:
+                    logger.info("Processing product comparison intent")
                     # Find alternatives for comparison
                     if state.get("retrieved_products"):
                         for product in state["retrieved_products"][:1]:  # Compare first product
-                            alternatives = await find_product_alternatives.ainvoke({
+                            tool_params = {
                                 "product_name": product.get("name", ""), 
                                 "dietary_restrictions": state.get("user_profile", {}).get("dietary_restrictions", [])
-                            })
-                            new_state["recommendations"].append({
-                                "type": "alternatives",
-                                "original_product": product,
-                                "alternatives": alternatives,
-                                "reason": "Alternative products for comparison"
-                            })
-                            actions_taken.append(f"Found alternatives for {product.get('name', 'product')}")
+                            }
+                            try:
+                                alternatives = await find_product_alternatives.ainvoke(tool_params)
+                                log_tool_usage("find_product_alternatives", tool_params, alternatives)
+                                new_state["recommendations"].append({
+                                    "type": "alternatives",
+                                    "original_product": product,
+                                    "alternatives": alternatives,
+                                    "reason": "Alternative products for comparison"
+                                })
+                                actions_taken.append(f"Found alternatives for {product.get('name', 'product')}")
+                                logger.info(f"Successfully found alternatives for {product.get('name')}")
+                            except Exception as e:
+                                log_tool_usage("find_product_alternatives", tool_params, error=str(e))
+                                logger.error(f"Failed to find alternatives for {product.get('name')}: {e}")
                 
                 new_state["actions_taken"] = actions_taken
                 new_state["reasoning_step"] = "action_execution"
                 
+                logger.info(f"Action execution completed. {len(actions_taken)} actions taken: {actions_taken}")
                 new_state = self._add_thought(new_state, f"Completed {len(actions_taken)} actions")
                 return new_state
                 
             except Exception as e:
+                logger.error(f"Error during action execution: {e}")
                 state = self._add_thought(state, f"Error executing actions: {str(e)}")
                 new_state = dict(state)
                 new_state["actions_taken"] = ["Error occurred during action execution"]
@@ -518,6 +671,13 @@ class WalmartShoppingAssistant:
         Returns:
             Dictionary containing the response and agent thoughts
         """
+        session_start = datetime.now()
+        logger.info(f"=== CHAT SESSION START ===")
+        logger.info(f"User ID: {user_id}")
+        logger.info(f"Message: {user_message}")
+        logger.info(f"Chat history length: {len(chat_history) if chat_history else 0}")
+        logger.info(f"User profile provided: {bool(user_profile)}")
+        
         # Initialize state with conversation history
         initial_state = ShoppingAssistantState(
             user_id=user_id,
@@ -541,12 +701,20 @@ class WalmartShoppingAssistant:
         print(f"🔄 Processing...")
         
         try:
+            logger.info("Starting agent workflow execution")
             # Run the agent workflow
             final_state = await self.agent_graph.ainvoke(initial_state)
             
+            session_duration = (datetime.now() - session_start).total_seconds()
+            logger.info(f"Agent workflow completed in {session_duration:.2f} seconds")
+            logger.info(f"Final intent: {final_state.get('current_intent', 'unknown')}")
+            logger.info(f"Products found: {len(final_state.get('retrieved_products', []))}")
+            logger.info(f"Actions taken: {len(final_state.get('actions_taken', []))}")
+            logger.info(f"Recommendations: {len(final_state.get('recommendations', []))}")
+            
             print(f"🤖 Assistant: {final_state['final_response']}")
             
-            return {
+            result = {
                 "response": final_state["final_response"],
                 "products": final_state.get("retrieved_products", []),
                 "recommendations": final_state.get("recommendations", []),
@@ -560,8 +728,14 @@ class WalmartShoppingAssistant:
                 "success": True
             }
             
+            logger.info(f"=== CHAT SESSION END (SUCCESS) === Duration: {session_duration:.2f}s")
+            return result
+            
         except Exception as e:
+            session_duration = (datetime.now() - session_start).total_seconds()
             error_msg = f"I apologize, but I encountered an error: {str(e)}"
+            logger.error(f"Chat session failed after {session_duration:.2f}s: {e}")
+            logger.error(f"=== CHAT SESSION END (ERROR) === Duration: {session_duration:.2f}s")
             print(f"❌ Error: {error_msg}")
             
             return {

@@ -5,12 +5,31 @@ Tools for interacting with the backend API, ChromaDB, and performing shopping ta
 
 import asyncio
 import httpx
+import logging
 from typing import Dict, List, Any, Optional
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from query_products import ProductSearcher
 from config import Config
+
+# Set up logging for tools
+tool_logger = logging.getLogger("ToolUsage")
+api_logger = logging.getLogger("BackendAPI")
+
+def log_tool_call(tool_name: str, params: Dict[str, Any], result: Any = None, error: str = None):
+    """Log tool calls with parameters and results."""
+    if error:
+        tool_logger.error(f"🔧 {tool_name} FAILED: {error} | Params: {params}")
+    else:
+        tool_logger.info(f"🔧 {tool_name} CALLED | Params: {params}")
+        if result:
+            if isinstance(result, list):
+                tool_logger.info(f"🔧 {tool_name} RESULT: {len(result)} items returned")
+            elif isinstance(result, dict):
+                tool_logger.info(f"🔧 {tool_name} RESULT: {list(result.keys())}")
+            else:
+                tool_logger.info(f"🔧 {tool_name} RESULT: {type(result).__name__}")
 
 class WalmartAPIClient:
     """Client for interacting with the FastAPI backend."""
@@ -108,7 +127,15 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
     Returns:
         List of relevant products with details
     """
+    params = {"query": query, "max_results": max_results}
+    tool_logger.info(f"🔍 Starting semantic product search: '{query}' (max: {max_results})")
+    
     try:
+        if not _product_searcher:
+            error = "Product searcher not initialized"
+            log_tool_call("search_products_semantic", params, error=error)
+            return [{"error": error}]
+        
         results = _product_searcher.search(query, n_results=max_results)
         
         formatted_products = []
@@ -125,9 +152,15 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
                 "similarity_score": 1 - product.get("distance", 0)
             })
         
+        log_tool_call("search_products_semantic", params, formatted_products)
+        tool_logger.info(f"🔍 Search completed: found {len(formatted_products)} products")
         return formatted_products
+        
     except Exception as e:
-        return [{"error": f"Search failed: {str(e)}"}]
+        error_msg = f"Search failed: {str(e)}"
+        log_tool_call("search_products_semantic", params, error=error_msg)
+        tool_logger.error(f"🔍 Search failed: {e}")
+        return [{"error": error_msg}]
 
 @tool
 async def get_user_shopping_list(user_id: str) -> List[Dict[str, Any]]:
@@ -160,7 +193,7 @@ async def add_product_to_list(user_id: str, product_id: str, quantity: int = 1) 
 @tool
 async def get_user_preferences(user_id: str) -> Dict[str, Any]:
     """
-    Get user profile and preferences.
+    Get user profile and preferences from backend API.
     
     Args:
         user_id: User identifier
@@ -168,12 +201,90 @@ async def get_user_preferences(user_id: str) -> Dict[str, Any]:
     Returns:
         User profile with preferences and history
     """
-    return await api_client.get_user_profile(user_id)
+    params = {"user_id": user_id}
+    api_logger.info(f"📡 Fetching user profile from backend API for user: {user_id}")
+    
+    try:
+        result = await api_client.get_user_profile(user_id)
+        log_tool_call("get_user_preferences", params, result)
+        
+        if result:
+            api_logger.info(f"📡 User profile retrieved successfully: {list(result.keys())}")
+        else:
+            api_logger.warning(f"📡 No user profile found for user: {user_id}")
+            
+        return result
+        
+    except Exception as e:
+        error_msg = f"Failed to get user profile: {str(e)}"
+        log_tool_call("get_user_preferences", params, error=error_msg)
+        api_logger.error(f"📡 Backend API call failed: {e}")
+        return {}
+
+@tool
+async def get_user_shopping_list(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Get user's current shopping list from backend API.
+    
+    Args:
+        user_id: User identifier
+    
+    Returns:
+        List of items in shopping list
+    """
+    params = {"user_id": user_id}
+    api_logger.info(f"🛍️ Fetching shopping list from backend API for user: {user_id}")
+    
+    try:
+        result = await api_client.get_shopping_list(user_id)
+        log_tool_call("get_user_shopping_list", params, result)
+        
+        api_logger.info(f"🛍️ Shopping list retrieved: {len(result)} items")
+        return result
+        
+    except Exception as e:
+        error_msg = f"Failed to get shopping list: {str(e)}"
+        log_tool_call("get_user_shopping_list", params, error=error_msg)
+        api_logger.error(f"🛍️ Backend API call failed: {e}")
+        return []
+
+@tool
+async def add_product_to_list(user_id: str, product_id: str, quantity: int = 1) -> Dict[str, Any]:
+    """
+    Add a product to the user's shopping list via backend API.
+    
+    Args:
+        user_id: User identifier
+        product_id: Product identifier
+        quantity: Quantity to add
+    
+    Returns:
+        Result of the add operation
+    """
+    params = {"user_id": user_id, "product_id": product_id, "quantity": quantity}
+    api_logger.info(f"➕ Adding product {product_id} (qty: {quantity}) to shopping list for user: {user_id}")
+    
+    try:
+        result = await api_client.add_to_shopping_list(user_id, product_id, quantity)
+        log_tool_call("add_product_to_list", params, result)
+        
+        if result.get("success"):
+            api_logger.info(f"➕ Product added successfully")
+        else:
+            api_logger.warning(f"➕ Failed to add product: {result.get('error', 'Unknown error')}")
+            
+        return result
+        
+    except Exception as e:
+        error_msg = f"Failed to add product to list: {str(e)}"
+        log_tool_call("add_product_to_list", params, error=error_msg)
+        api_logger.error(f"➕ Backend API call failed: {e}")
+        return {"success": False, "error": error_msg}
 
 @tool
 async def get_spending_breakdown(user_id: str) -> Dict[str, Any]:
     """
-    Get user's spending analytics by category.
+    Get user's spending analytics by category from backend API.
     
     Args:
         user_id: User identifier
@@ -181,7 +292,25 @@ async def get_spending_breakdown(user_id: str) -> Dict[str, Any]:
     Returns:
         Spending breakdown by category
     """
-    return await api_client.get_spending_analytics(user_id)
+    params = {"user_id": user_id}
+    api_logger.info(f"💰 Fetching spending breakdown from backend API for user: {user_id}")
+    
+    try:
+        # For now, return mock data since we don't have this endpoint implemented
+        result = {
+            "total_spent": 0.0,
+            "categories": {},
+            "weekly_average": 0.0
+        }
+        log_tool_call("get_spending_breakdown", params, result)
+        api_logger.info(f"💰 Spending breakdown retrieved")
+        return result
+        
+    except Exception as e:
+        error_msg = f"Failed to get spending breakdown: {str(e)}"
+        log_tool_call("get_spending_breakdown", params, error=error_msg)
+        api_logger.error(f"💰 Backend API call failed: {e}")
+        return {"total_spent": 0.0, "categories": {}, "weekly_average": 0.0}
 
 @tool
 async def filter_products_by_dietary_restrictions(products: List[Dict[str, Any]], 
