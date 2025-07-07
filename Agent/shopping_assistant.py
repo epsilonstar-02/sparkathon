@@ -48,6 +48,8 @@ from shopping_tools import (
     search_products_semantic,
     get_user_shopping_list,
     add_product_to_list,
+    remove_product_from_list,
+    clear_shopping_list,
     get_user_preferences,
     get_spending_breakdown,
     filter_products_by_dietary_restrictions,
@@ -138,15 +140,37 @@ class WalmartShoppingAssistant:
             
             Possible intents:
             - product_discovery: Looking for specific products or asking "what do you have"
-            - shopping_list_management: Adding/removing items from shopping list
+            - shopping_list_management: Adding/removing/clearing items from shopping list, viewing list
             - meal_planning: Planning meals, asking for recipes, meal prep
             - budget_analysis: Questions about spending, budget optimization
             - nutrition_analysis: Health-focused queries, dietary needs
             - general_chat: Casual conversation, greetings, general questions, follow-up responses
             - comparison: Comparing products or asking for alternatives
             
-            If the user is responding to a previous question or providing additional context,
-            consider the conversation history to determine the most appropriate intent.
+            Pay special attention to shopping list management - this includes:
+            - Clear/empty/reset my list
+            - I don't need these anymore
+            - Start fresh
+            - Remove everything
+            - Show me my list
+            - Add these to my cart/list
+            - Add those items to my cart
+            - Add the meal plan to my cart
+            - Put those in my cart
+            
+            CONTEXT AWARENESS: If the conversation history shows that the assistant just provided:
+            - A meal plan, recipes, or meal suggestions
+            - A list of products or ingredients
+            - Shopping recommendations
+            
+            And the user now says something like:
+            - "add those to my cart"
+            - "add these items"
+            - "put those in my list"
+            - "I'll take those"
+            - "add them to my cart"
+            
+            Then classify this as "shopping_list_management" because they're referring to previously mentioned items.
             
             Respond with ONLY the intent name."""),
             ("human", """
@@ -187,6 +211,28 @@ class WalmartShoppingAssistant:
         print(f"🤔 Agent Thought: {formatted_thought}")
         return new_state
     
+    async def _make_agentic_decision(self, prompt: str, context: str = "") -> str:
+        """
+        Make an agentic decision using the LLM for intelligent action determination.
+        
+        Args:
+            prompt: The decision prompt for the LLM
+            context: Additional context for the decision
+            
+        Returns:
+            The LLM's decision as a string
+        """
+        try:
+            full_prompt = f"{prompt}\n\nContext: {context}" if context else prompt
+            logger.info("LLM API call: Making agentic decision.")
+            response = self.llm.invoke([HumanMessage(content=full_prompt)])
+            decision = response.content.strip().upper()
+            logger.info(f"LLM agentic decision: {decision}")
+            return decision
+        except Exception as e:
+            logger.error(f"Error in agentic decision making: {e}")
+            return "FALLBACK"
+    
     def _build_agent_graph(self) -> StateGraph:
         """Build the LangGraph workflow for the shopping assistant."""
         
@@ -215,6 +261,24 @@ class WalmartShoppingAssistant:
                     )
                 )
                 intent = response.content.strip().lower()
+                
+                # Fallback pattern matching for better accuracy in testing
+                message_lower = state["current_message"].lower()
+                if intent not in ["product_discovery", "shopping_list_management", "meal_planning", 
+                                "budget_analysis", "nutrition_analysis", "general_chat", "comparison"]:
+                    # Apply pattern matching as fallback
+                    if any(keyword in message_lower for keyword in ["clear", "empty", "remove", "delete shopping list", "reset list"]):
+                        intent = "shopping_list_management"
+                    elif any(keyword in message_lower for keyword in ["meal", "recipe", "dinner", "breakfast", "lunch", "plan meals"]):
+                        intent = "meal_planning"
+                    elif any(keyword in message_lower for keyword in ["hello", "hi", "hey", "thank", "thanks"]):
+                        intent = "general_chat"
+                    elif any(keyword in message_lower for keyword in ["budget", "spend", "cost", "money"]):
+                        intent = "budget_analysis"
+                    elif any(keyword in message_lower for keyword in ["snack", "food", "product", "find", "buy", "need"]):
+                        intent = "product_discovery"
+                    else:
+                        intent = "general_chat"
                 
                 # Create updated state
                 new_state = dict(state)
@@ -383,140 +447,626 @@ class WalmartShoppingAssistant:
                 if "recommendations" not in new_state:
                     new_state["recommendations"] = []
                 
-                # Intent-specific actions with enhanced logging
+                # Intent-specific actions with enhanced agentic decision making
                 if intent in ["shopping_list_management"]:
-                    logger.info("Processing shopping list management intent")
-                    # Check if user wants to add products
-                    if any(keyword in state["current_message"].lower() 
-                           for keyword in ["add", "put", "include", "need"]):
-                        # Add recommended products to shopping list
-                        products_to_add = state.get("retrieved_products", [])[:2]  # Add top 2
-                        logger.info(f"Attempting to add {len(products_to_add)} products to shopping list")
+                    logger.info("Processing shopping list management intent with agentic decision making")
+                    
+                    # Format chat history for context awareness
+                    chat_history_text = ""
+                    if state.get("chat_history"):
+                        history_items = []
+                        for msg in state["chat_history"][-4:]:  # Last 4 messages for context
+                            role = "User" if msg.get("role") == "user" else "Assistant"
+                            content = msg.get("content", "")
+                            history_items.append(f"{role}: {content}")
+                        chat_history_text = "\n".join(history_items)
+                    
+                    # Use LLM to determine the specific shopping list action needed with context
+                    shopping_action_prompt = f"""
+                    Analyze this user message and recent conversation to determine what shopping list action they want:
+                    
+                    Recent conversation history:
+                    {chat_history_text}
+                    
+                    Current user message: "{state["current_message"]}"
+                    Current shopping list has: {len(new_state["shopping_list"])} items
+                    Available products from current search: {len(state.get("retrieved_products", []))} items
+                    
+                    Context analysis:
+                    - Did the assistant just provide a meal plan, product recommendations, or ingredient list in the conversation?
+                    - Is the user now asking to add "those items", "these products", "the meal plan", etc. to their cart/list?
+                    - Are they referring to previously mentioned items?
+                    
+                    Respond with ONLY one of these actions:
+                    - CLEAR_LIST: if they want to empty/clear/reset their shopping list
+                    - ADD_PRODUCTS: if they want to add found products OR previously mentioned items to their list
+                    - ADD_FROM_CONTEXT: if they're referring to items from recent conversation (meal plans, etc.)
+                    - REMOVE_SPECIFIC: if they want to remove specific items (not implemented yet)
+                    - VIEW_LIST: if they just want to see their current list
+                    - NO_ACTION: if no clear shopping list action is needed
+                    """
+                    
+                    shopping_action = await self._make_agentic_decision(shopping_action_prompt)
+                    
+                    # Execute the determined action with robust error handling
+                    if shopping_action == "CLEAR_LIST":
+                        logger.info("Executing CLEAR_LIST action based on agentic decision")
+                        tool_params = {"user_id": user_id}
+                        try:
+                            result = await clear_shopping_list.ainvoke(tool_params)
+                            log_tool_usage("clear_shopping_list", tool_params, result)
+                            if result.get("success"):
+                                actions_taken.append(f"✅ {result.get('message', 'Shopping list cleared successfully')}")
+                                new_state["shopping_list"] = []  # Update local state
+                                logger.info(f"Successfully cleared shopping list: {result.get('message')}")
+                            else:
+                                actions_taken.append(f"⚠️ Partial clear: {result.get('message', 'Some items may not have been removed')}")
+                                logger.warning(f"Partial clear result: {result.get('message')}")
+                        except Exception as e:
+                            log_tool_usage("clear_shopping_list", tool_params, error=str(e))
+                            logger.error(f"Error clearing shopping list: {e}")
+                            actions_taken.append("❌ Failed to clear shopping list due to technical error")
+                    
+                    elif shopping_action in ["ADD_PRODUCTS", "ADD_FROM_CONTEXT"]:
+                        logger.info(f"Executing {shopping_action} action based on agentic decision")
                         
-                        for product in products_to_add:
-                            if product.get("id"):
-                                tool_params = {
-                                    "user_id": user_id, 
-                                    "product_id": product["id"], 
-                                    "quantity": 1
+                        # If user is referring to context and we don't have current products, search for meal plan items
+                        if shopping_action == "ADD_FROM_CONTEXT" and not state.get("retrieved_products"):
+                            logger.info("User referring to items from conversation context - extracting from recent recommendations")
+                            
+                            # First, try to extract products from recent recommendations (meal plans, etc.)
+                            context_products = []
+                            for recommendation in new_state.get("recommendations", [])[-3:]:  # Check last 3 recommendations
+                                if recommendation.get("type") == "meal_plan":
+                                    meal_plan = recommendation.get("meal_suggestions", {})
+                                    meal_plan_data = meal_plan.get("meal_plan", {})
+                                    for meal_type, products in meal_plan_data.items():
+                                        if isinstance(products, list):
+                                            context_products.extend(products)
+                                elif recommendation.get("type") in ["ingredient_list", "quick_recipe"]:
+                                    ingredients = recommendation.get("ingredients", [])
+                                    if isinstance(ingredients, list):
+                                        context_products.extend(ingredients)
+                            
+                            # If we still don't have products, search based on chat history
+                            if not context_products:
+                                # Extract search terms from recent chat history
+                                search_terms = []
+                                for message in state.get("chat_history", [])[-5:]:  # Check last 5 messages
+                                    if not message.get("is_user", True):  # Assistant messages
+                                        content = message.get("content", "").lower()
+                                        # Look for food/ingredient mentions
+                                        food_terms = ["oatmeal", "breakfast", "lunch", "dinner", "chicken", "pasta", "rice", 
+                                                     "bread", "milk", "eggs", "vegetables", "fruits", "snacks"]
+                                        found_terms = [term for term in food_terms if term in content]
+                                        search_terms.extend(found_terms)
+                                
+                                if search_terms:
+                                    context_search_query = " ".join(search_terms[:5])  # Use top 5 terms
+                                else:
+                                    context_search_query = "healthy meal plan ingredients"
+                                    
+                                search_params = {
+                                    "query": context_search_query,
+                                    "max_results": 8
                                 }
                                 try:
-                                    result = await add_product_to_list.ainvoke(tool_params)
-                                    log_tool_usage("add_product_to_list", tool_params, result)
-                                    if result.get("success"):
-                                        actions_taken.append(f"Added {product.get('name', 'product')} to shopping list")
-                                        logger.info(f"Successfully added product {product.get('name')} to shopping list")
-                                    else:
-                                        logger.warning(f"Failed to add product {product.get('name')} to shopping list")
+                                    context_products = await search_products_semantic.ainvoke(search_params)
+                                    log_tool_usage("search_products_semantic (context)", search_params, context_products)
+                                    logger.info(f"Found {len(context_products)} products from context search with query: '{context_search_query}'")
                                 except Exception as e:
-                                    log_tool_usage("add_product_to_list", tool_params, error=str(e))
-                                    logger.error(f"Error adding product to shopping list: {e}")
+                                    log_tool_usage("search_products_semantic (context)", search_params, error=str(e))
+                                    logger.error(f"Context search failed: {e}")
+                                    context_products = []
+                            
+                            if context_products:
+                                new_state["retrieved_products"] = context_products
+                                actions_taken.append(f"🔍 Found {len(context_products)} items from our conversation")
+                                logger.info(f"Successfully extracted {len(context_products)} products from conversation context")
+                            else:
+                                logger.warning("No products found in conversation context")
+                        
+                        products_to_add = new_state.get("retrieved_products", [])[:5]  # Add top 5
+                        
+                        if not products_to_add:
+                            actions_taken.append("⚠️ I don't see any specific items to add. Could you please specify what products you'd like in your cart?")
+                            logger.info("No products available to add to shopping list")
+                        else:
+                            added_count = 0
+                            failed_count = 0
+                            added_items = []
+                            
+                            for product in products_to_add:
+                                product_id = product.get("id")
+                                product_name = product.get("name", "Unknown item")
+                                
+                                if product_id:
+                                    tool_params = {
+                                        "user_id": user_id, 
+                                        "product_id": product_id, 
+                                        "quantity": 1
+                                    }
+                                    try:
+                                        result = await add_product_to_list.ainvoke(tool_params)
+                                        log_tool_usage("add_product_to_list", tool_params, result)
+                                        if result.get("success"):
+                                            added_count += 1
+                                            added_items.append(product_name)
+                                            logger.info(f"Successfully added product {product_name} (ID: {product_id}) to shopping list")
+                                        else:
+                                            failed_count += 1
+                                            logger.warning(f"Failed to add product {product_name}: {result.get('error')}")
+                                    except Exception as e:
+                                        failed_count += 1
+                                        log_tool_usage("add_product_to_list", tool_params, error=str(e))
+                                        logger.error(f"Error adding product {product_name} to shopping list: {e}")
+                                else:
+                                    failed_count += 1
+                                    logger.warning(f"Product {product_name} has no ID - cannot add to shopping list")
+                            
+                            if added_count > 0:
+                                items_summary = ", ".join(added_items[:3])
+                                if len(added_items) > 3:
+                                    items_summary += f" and {len(added_items) - 3} more items"
+                                actions_taken.append(f"✅ Added {added_count} items to your cart: {items_summary}")
+                            if failed_count > 0:
+                                actions_taken.append(f"⚠️ {failed_count} products could not be added")
+                    
+                    elif shopping_action == "VIEW_LIST":
+                        actions_taken.append(f"📋 Your shopping list contains {len(new_state['shopping_list'])} items")
+                        logger.info("User requested to view their current shopping list")
+                    
+                    elif shopping_action == "REMOVE_SPECIFIC":
+                        actions_taken.append("🔧 Specific item removal feature coming soon!")
+                        logger.info("User requested specific item removal (not yet implemented)")
+                    
+                    else:  # NO_ACTION, FALLBACK, or unknown
+                        logger.info(f"No specific shopping list action needed for decision: {shopping_action}")
+                        actions_taken.append("📝 Reviewed your shopping list preferences")
                 
                 elif intent in ["budget_analysis"]:
-                    logger.info("Processing budget analysis intent")
-                    # Get spending analytics
-                    tool_params = {"user_id": user_id}
-                    try:
-                        spending_data = await get_spending_breakdown.ainvoke(tool_params)
-                        log_tool_usage("get_spending_breakdown", tool_params, spending_data)
-                        if "api_responses" not in new_state:
-                            new_state["api_responses"] = []
-                        new_state["api_responses"].append({"spending_analytics": spending_data})
-                        actions_taken.append("Retrieved spending analytics from backend")
-                        logger.info("Successfully retrieved spending analytics")
-                    except Exception as e:
-                        log_tool_usage("get_spending_breakdown", tool_params, error=str(e))
-                        logger.error(f"Failed to retrieve spending analytics: {e}")
+                    logger.info("Processing budget analysis intent with agentic decision making")
                     
-                    # Optimize shopping list if requested
-                    if state.get("shopping_list"):
-                        budget_limit = state.get("user_profile", {}).get("budget_limit", 100.0)
-                        tool_params = {
-                            "shopping_list": state["shopping_list"], 
-                            "budget_limit": budget_limit
-                        }
-                        try:
-                            optimized_list = await optimize_shopping_list_for_budget.ainvoke(tool_params)
-                            log_tool_usage("optimize_shopping_list_for_budget", tool_params, optimized_list)
-                            new_state["recommendations"].append({
-                                "type": "budget_optimization",
-                                "optimized_list": optimized_list,
-                                "reason": f"Optimized for ${budget_limit} budget"
-                            })
-                            actions_taken.append("Generated budget-optimized shopping list")
-                            logger.info(f"Successfully optimized shopping list for ${budget_limit} budget")
-                        except Exception as e:
-                            log_tool_usage("optimize_shopping_list_for_budget", tool_params, error=str(e))
-                            logger.error(f"Failed to optimize shopping list: {e}")
-                
-                elif intent in ["meal_planning"]:
-                    logger.info("Processing meal planning intent")
-                    # Generate meal plan
-                    dietary_prefs = state.get("user_profile", {}).get("dietary_restrictions", [])
-                    budget = state.get("user_profile", {}).get("budget_limit", 100.0)
+                    # Use LLM to determine what specific budget analysis is needed
+                    budget_action_prompt = f"""
+                    Analyze this user message about budget and determine what specific analysis they want:
                     
-                    tool_params = {
-                        "dietary_preferences": dietary_prefs, 
-                        "budget": budget, 
-                        "days": 7
-                    }
-                    try:
-                        meal_plan = await generate_meal_plan_suggestions.ainvoke(tool_params)
-                        log_tool_usage("generate_meal_plan_suggestions", tool_params, meal_plan)
-                        new_state["recommendations"].append({
-                            "type": "meal_plan",
-                            "meal_suggestions": meal_plan,
-                            "reason": "Personalized meal plan based on your preferences"
-                        })
-                        actions_taken.append("Generated personalized meal plan")
-                        logger.info(f"Successfully generated meal plan for {len(dietary_prefs)} dietary preferences")
-                    except Exception as e:
-                        log_tool_usage("generate_meal_plan_suggestions", tool_params, error=str(e))
-                        logger.error(f"Failed to generate meal plan: {e}")
-                
-                elif intent in ["nutrition_analysis"]:
-                    logger.info("Processing nutrition analysis intent")
-                    # Analyze nutrition of current shopping list or products
-                    items_to_analyze = state.get("retrieved_products", []) or state.get("shopping_list", [])
-                    if items_to_analyze:
-                        tool_params = {"products": items_to_analyze}
+                    User message: "{state["current_message"]}"
+                    Current shopping list has: {len(new_state["shopping_list"])} items
+                    User budget limit: {state.get("user_profile", {}).get("budget_limit", "not set")}
+                    
+                    Respond with ONLY one of these actions:
+                    - GET_SPENDING: if they want to see their spending history/analytics
+                    - OPTIMIZE_LIST: if they want to optimize their current shopping list for budget
+                    - SET_BUDGET: if they want to set or change their budget limit
+                    - BUDGET_ADVICE: if they want general budget advice
+                    - NO_ACTION: if no specific budget action is needed
+                    """
+                    
+                    budget_action = await self._make_agentic_decision(budget_action_prompt)
+                    
+                    # Execute determined budget action with robust error handling
+                    if budget_action == "GET_SPENDING":
+                        logger.info("Executing GET_SPENDING action based on agentic decision")
+                        tool_params = {"user_id": user_id}
                         try:
-                            nutrition_analysis = await analyze_nutrition_profile.ainvoke(tool_params)
-                            log_tool_usage("analyze_nutrition_profile", tool_params, nutrition_analysis)
-                            new_state["recommendations"].append({
-                                "type": "nutrition_analysis",
-                                "analysis": nutrition_analysis,
-                                "reason": "Nutritional breakdown of your selected items"
-                            })
-                            actions_taken.append(f"Analyzed nutritional profile of {len(items_to_analyze)} items")
-                            logger.info(f"Successfully analyzed nutrition for {len(items_to_analyze)} items")
+                            spending_data = await get_spending_breakdown.ainvoke(tool_params)
+                            log_tool_usage("get_spending_breakdown", tool_params, spending_data)
+                            if "api_responses" not in new_state:
+                                new_state["api_responses"] = []
+                            new_state["api_responses"].append({"spending_analytics": spending_data})
+                            actions_taken.append("📊 Retrieved your spending analytics")
+                            logger.info("Successfully retrieved spending analytics")
                         except Exception as e:
-                            log_tool_usage("analyze_nutrition_profile", tool_params, error=str(e))
-                            logger.error(f"Failed to analyze nutrition: {e}")
-                
-                elif intent in ["comparison"]:
-                    logger.info("Processing product comparison intent")
-                    # Find alternatives for comparison
-                    if state.get("retrieved_products"):
-                        for product in state["retrieved_products"][:1]:  # Compare first product
+                            log_tool_usage("get_spending_breakdown", tool_params, error=str(e))
+                            logger.error(f"Failed to retrieve spending analytics: {e}")
+                            actions_taken.append("❌ Unable to retrieve spending data at this time")
+                    
+                    elif budget_action == "OPTIMIZE_LIST":
+                        logger.info("Executing OPTIMIZE_LIST action based on agentic decision")
+                        if new_state.get("shopping_list"):
+                            budget_limit = state.get("user_profile", {}).get("budget_limit", 100.0)
                             tool_params = {
-                                "product_name": product.get("name", ""), 
-                                "dietary_restrictions": state.get("user_profile", {}).get("dietary_restrictions", [])
+                                "shopping_list": new_state["shopping_list"], 
+                                "max_budget": budget_limit
                             }
                             try:
-                                alternatives = await find_product_alternatives.ainvoke(tool_params)
-                                log_tool_usage("find_product_alternatives", tool_params, alternatives)
-                                new_state["recommendations"].append({
-                                    "type": "alternatives",
-                                    "original_product": product,
-                                    "alternatives": alternatives,
-                                    "reason": "Alternative products for comparison"
-                                })
-                                actions_taken.append(f"Found alternatives for {product.get('name', 'product')}")
-                                logger.info(f"Successfully found alternatives for {product.get('name')}")
+                                optimized_list = await optimize_shopping_list_for_budget.ainvoke(tool_params)
+                                log_tool_usage("optimize_shopping_list_for_budget", tool_params, optimized_list)
+                                
+                                if optimized_list.get("error"):
+                                    actions_taken.append("❌ Unable to optimize your shopping list at this time")
+                                    logger.error(f"Budget optimization failed: {optimized_list.get('error')}")
+                                else:
+                                    new_state["recommendations"].append({
+                                        "type": "budget_optimization",
+                                        "optimized_list": optimized_list,
+                                        "reason": f"Optimized for ${budget_limit} budget"
+                                    })
+                                    savings = optimized_list.get("savings", 0)
+                                    actions_taken.append(f"💰 Optimized your list - potential savings: ${savings:.2f}")
+                                    logger.info(f"Successfully optimized shopping list with ${savings:.2f} savings")
                             except Exception as e:
-                                log_tool_usage("find_product_alternatives", tool_params, error=str(e))
-                                logger.error(f"Failed to find alternatives for {product.get('name')}: {e}")
+                                log_tool_usage("optimize_shopping_list_for_budget", tool_params, error=str(e))
+                                logger.error(f"Failed to optimize shopping list: {e}")
+                                actions_taken.append("❌ Unable to optimize your shopping list due to technical error")
+                        else:
+                            actions_taken.append("⚠️ No items in your shopping list to optimize")
+                            logger.info("No shopping list items available for budget optimization")
+                    
+                    elif budget_action == "SET_BUDGET":
+                        actions_taken.append("🔧 Budget setting feature - please specify your desired budget amount")
+                        logger.info("User wants to set/change budget limit (feature to be enhanced)")
+                    
+                    elif budget_action == "BUDGET_ADVICE":
+                        actions_taken.append("💡 Added budget advice to recommendations")
+                        new_state["recommendations"].append({
+                            "type": "budget_advice",
+                            "advice": "Consider setting a weekly budget limit and tracking your spending by category",
+                            "reason": "General budget management guidance"
+                        })
+                        logger.info("Provided general budget advice")
+                    
+                    else:  # NO_ACTION, FALLBACK, or unknown
+                        logger.info(f"No specific budget action needed for decision: {budget_action}")
+                        actions_taken.append("📋 Reviewed your budget preferences")
+                
+                elif intent in ["meal_planning"]:
+                    logger.info("Processing meal planning intent with agentic decision making")
+                    
+                    # Use LLM to determine specific meal planning needs
+                    meal_action_prompt = f"""
+                    Analyze this user message about meal planning and determine what they specifically need:
+                    
+                    User message: "{state["current_message"]}"
+                    User dietary restrictions: {state.get("user_profile", {}).get("dietary_restrictions", [])}
+                    User budget: {state.get("user_profile", {}).get("budget_limit", "not set")}
+                    Available products from search: {len(state.get("retrieved_products", []))} items
+                    
+                    Respond with ONLY one of these actions:
+                    - FULL_MEAL_PLAN: if they want a complete weekly meal plan with shopping list
+                    - QUICK_RECIPE: if they need a quick recipe for today/tonight
+                    - INGREDIENT_LIST: if they want ingredients for a specific dish
+                    - DIETARY_MEALS: if they want meals that fit specific dietary needs
+                    - MEAL_PREP: if they want meal prep suggestions
+                    - NO_ACTION: if no specific meal planning action is needed
+                    """
+                    
+                    meal_action = await self._make_agentic_decision(meal_action_prompt)
+                    
+                    # Execute determined meal planning action
+                    if meal_action in ["FULL_MEAL_PLAN", "MEAL_PREP", "DIETARY_MEALS"]:
+                        logger.info(f"Executing {meal_action} action based on agentic decision")
+                        dietary_prefs = state.get("user_profile", {}).get("dietary_restrictions", [])
+                        budget = state.get("user_profile", {}).get("budget_limit", 100.0)
+                        
+                        # Adjust days based on action type
+                        days = 7 if meal_action == "FULL_MEAL_PLAN" else 3 if meal_action == "MEAL_PREP" else 5
+                        
+                        tool_params = {
+                            "dietary_preferences": dietary_prefs, 
+                            "budget": budget, 
+                            "days": days
+                        }
+                        try:
+                            meal_plan = await generate_meal_plan_suggestions.ainvoke(tool_params)
+                            log_tool_usage("generate_meal_plan_suggestions", tool_params, meal_plan)
+                            
+                            if meal_plan.get("error"):
+                                actions_taken.append("❌ Unable to generate meal plan at this time")
+                                logger.error(f"Meal plan generation failed: {meal_plan.get('error')}")
+                            else:
+                                plan_type = "weekly" if days == 7 else "meal prep" if days == 3 else "dietary-focused"
+                                new_state["recommendations"].append({
+                                    "type": "meal_plan",
+                                    "meal_suggestions": meal_plan,
+                                    "reason": f"Personalized {plan_type} meal plan based on your preferences"
+                                })
+                                
+                                # Extract all products from meal plan and store them in retrieved_products
+                                # so they can be added to shopping list when user requests it
+                                meal_plan_products = []
+                                meal_suggestions = meal_plan.get("meal_plan", {})
+                                for meal_type, products in meal_suggestions.items():
+                                    if isinstance(products, list):
+                                        meal_plan_products.extend(products)
+                                
+                                # Store the meal plan products for potential shopping list addition
+                                new_state["retrieved_products"] = meal_plan_products
+                                
+                                estimated_cost = meal_plan.get("estimated_cost", 0)
+                                actions_taken.append(f"🍽️ Generated {plan_type} meal plan (estimated cost: ${estimated_cost:.2f})")
+                                actions_taken.append(f"📋 Found {len(meal_plan_products)} ingredients you can add to your shopping list")
+                                logger.info(f"Successfully generated meal plan for {len(dietary_prefs)} dietary preferences")
+                                logger.info(f"Extracted {len(meal_plan_products)} products from meal plan for potential shopping list addition")
+                        except Exception as e:
+                            log_tool_usage("generate_meal_plan_suggestions", tool_params, error=str(e))
+                            logger.error(f"Failed to generate meal plan: {e}")
+                            actions_taken.append("❌ Unable to generate meal plan due to technical error")
+                    
+                    elif meal_action == "QUICK_RECIPE":
+                        logger.info("Executing QUICK_RECIPE action based on agentic decision")
+                        if state.get("retrieved_products"):
+                            # Use found products to suggest a quick recipe
+                            products = state["retrieved_products"][:3]
+                            product_names = [p.get("name", "unknown") for p in products]
+                            actions_taken.append(f"🍳 Found quick recipe ideas using: {', '.join(product_names)}")
+                            new_state["recommendations"].append({
+                                "type": "quick_recipe",
+                                "ingredients": products,
+                                "reason": "Quick recipe based on available ingredients"
+                            })
+                            logger.info("Generated quick recipe suggestions")
+                        else:
+                            actions_taken.append("🔍 No specific ingredients found - would you like me to search for something?")
+                    
+                    elif meal_action == "INGREDIENT_LIST":
+                        logger.info("Executing INGREDIENT_LIST action based on agentic decision")
+                        if state.get("retrieved_products"):
+                            products = state["retrieved_products"]
+                            actions_taken.append(f"📝 Found {len(products)} ingredients for your dish")
+                            new_state["recommendations"].append({
+                                "type": "ingredient_list",
+                                "ingredients": products,
+                                "reason": "Ingredients for your requested dish"
+                            })
+                        else:
+                            actions_taken.append("⚠️ Please specify what dish you'd like ingredients for")
+                    
+                    else:  # NO_ACTION, FALLBACK, or unknown
+                        logger.info(f"No specific meal planning action needed for decision: {meal_action}")
+                        actions_taken.append("🍽️ Ready to help with your meal planning needs")
+                
+                elif intent in ["nutrition_analysis"]:
+                    logger.info("Processing nutrition analysis intent with agentic decision making")
+                    
+                    # Use LLM to determine specific nutrition analysis needs
+                    nutrition_action_prompt = f"""
+                    Analyze this user message about nutrition and determine what specific analysis they want:
+                    
+                    User message: "{state["current_message"]}"
+                    Shopping list items: {len(new_state.get("shopping_list", []))} items
+                    Found products: {len(state.get("retrieved_products", []))} items
+                    User dietary restrictions: {state.get("user_profile", {}).get("dietary_restrictions", [])}
+                    
+                    Respond with ONLY one of these actions:
+                    - ANALYZE_SHOPPING_LIST: if they want nutrition analysis of their shopping list
+                    - ANALYZE_PRODUCTS: if they want nutrition analysis of found/searched products
+                    - HEALTH_RECOMMENDATIONS: if they want health-focused product recommendations
+                    - DIETARY_CHECK: if they want to check if items meet their dietary needs
+                    - NUTRITION_EDUCATION: if they want general nutrition information
+                    - NO_ACTION: if no specific nutrition analysis is needed
+                    """
+                    
+                    nutrition_action = await self._make_agentic_decision(nutrition_action_prompt)
+                    
+                    # Execute determined nutrition action
+                    if nutrition_action == "ANALYZE_SHOPPING_LIST":
+                        logger.info("Executing ANALYZE_SHOPPING_LIST action based on agentic decision")
+                        if new_state.get("shopping_list"):
+                            tool_params = {"shopping_list": new_state["shopping_list"]}
+                            try:
+                                nutrition_analysis = await analyze_nutrition_profile.ainvoke(tool_params)
+                                log_tool_usage("analyze_nutrition_profile", tool_params, nutrition_analysis)
+                                
+                                if nutrition_analysis.get("error"):
+                                    actions_taken.append("❌ Unable to analyze nutrition of your shopping list")
+                                    logger.error(f"Nutrition analysis failed: {nutrition_analysis.get('error')}")
+                                else:
+                                    balance_score = nutrition_analysis.get("balance_score", 0)
+                                    suggestions_count = len(nutrition_analysis.get("suggestions", []))
+                                    new_state["recommendations"].append({
+                                        "type": "nutrition_analysis",
+                                        "analysis": nutrition_analysis,
+                                        "reason": "Nutritional breakdown of your shopping list"
+                                    })
+                                    actions_taken.append(f"🥗 Analyzed your shopping list nutrition (balance score: {balance_score:.1%}, {suggestions_count} suggestions)")
+                                    logger.info(f"Successfully analyzed nutrition for shopping list")
+                            except Exception as e:
+                                log_tool_usage("analyze_nutrition_profile", tool_params, error=str(e))
+                                logger.error(f"Failed to analyze nutrition: {e}")
+                                actions_taken.append("❌ Unable to analyze nutrition due to technical error")
+                        else:
+                            actions_taken.append("⚠️ Your shopping list is empty - add some items first")
+                    
+                    elif nutrition_action == "ANALYZE_PRODUCTS":
+                        logger.info("Executing ANALYZE_PRODUCTS action based on agentic decision")
+                        products_to_analyze = state.get("retrieved_products", [])
+                        if products_to_analyze:
+                            tool_params = {"shopping_list": products_to_analyze}
+                            try:
+                                nutrition_analysis = await analyze_nutrition_profile.ainvoke(tool_params)
+                                log_tool_usage("analyze_nutrition_profile", tool_params, nutrition_analysis)
+                                
+                                if nutrition_analysis.get("error"):
+                                    actions_taken.append("❌ Unable to analyze nutrition of found products")
+                                else:
+                                    new_state["recommendations"].append({
+                                        "type": "nutrition_analysis",
+                                        "analysis": nutrition_analysis,
+                                        "reason": "Nutritional breakdown of found products"
+                                    })
+                                    actions_taken.append(f"🥗 Analyzed nutrition of {len(products_to_analyze)} found products")
+                                    logger.info(f"Successfully analyzed nutrition for {len(products_to_analyze)} products")
+                            except Exception as e:
+                                log_tool_usage("analyze_nutrition_profile", tool_params, error=str(e))
+                                logger.error(f"Failed to analyze product nutrition: {e}")
+                                actions_taken.append("❌ Unable to analyze product nutrition due to technical error")
+                        else:
+                            actions_taken.append("⚠️ No products found to analyze - try searching for specific items")
+                    
+                    elif nutrition_action == "HEALTH_RECOMMENDATIONS":
+                        logger.info("Executing HEALTH_RECOMMENDATIONS action based on agentic decision")
+                        dietary_restrictions = state.get("user_profile", {}).get("dietary_restrictions", [])
+                        new_state["recommendations"].append({
+                            "type": "health_recommendations",
+                            "suggestions": [
+                                "Add more fruits and vegetables to your diet",
+                                "Include lean proteins for muscle health",
+                                "Choose whole grains over refined grains",
+                                "Stay hydrated with plenty of water"
+                            ],
+                            "dietary_considerations": dietary_restrictions,
+                            "reason": "General health and nutrition recommendations"
+                        })
+                        actions_taken.append("💚 Generated personalized health recommendations")
+                        logger.info("Provided health-focused recommendations")
+                    
+                    elif nutrition_action == "DIETARY_CHECK":
+                        logger.info("Executing DIETARY_CHECK action based on agentic decision")
+                        dietary_restrictions = state.get("user_profile", {}).get("dietary_restrictions", [])
+                        if dietary_restrictions:
+                            items_to_check = state.get("retrieved_products", []) or new_state.get("shopping_list", [])
+                            if items_to_check:
+                                # Use existing dietary filter tool to check compatibility
+                                tool_params = {"products": items_to_check, "restrictions": dietary_restrictions}
+                                try:
+                                    filtered_products = await filter_products_by_dietary_restrictions.ainvoke(tool_params)
+                                    compatible_count = len(filtered_products)
+                                    total_count = len(items_to_check)
+                                    incompatible_count = total_count - compatible_count
+                                    
+                                    if incompatible_count > 0:
+                                        actions_taken.append(f"⚠️ Found {incompatible_count} items that may not meet your dietary needs")
+                                    else:
+                                        actions_taken.append(f"✅ All {total_count} items are compatible with your dietary restrictions")
+                                    logger.info(f"Dietary compatibility check: {compatible_count}/{total_count} items compatible")
+                                except Exception as e:
+                                    logger.error(f"Failed dietary check: {e}")
+                                    actions_taken.append("❌ Unable to check dietary compatibility")
+                            else:
+                                actions_taken.append("⚠️ No items to check against your dietary restrictions")
+                        else:
+                            actions_taken.append("📝 No dietary restrictions set in your profile")
+                    
+                    elif nutrition_action == "NUTRITION_EDUCATION":
+                        logger.info("Executing NUTRITION_EDUCATION action based on agentic decision")
+                        actions_taken.append("📚 Added nutrition education to recommendations")
+                        new_state["recommendations"].append({
+                            "type": "nutrition_education",
+                            "topics": [
+                                "Understanding macronutrients (proteins, carbs, fats)",
+                                "Importance of micronutrients and vitamins",
+                                "Reading nutrition labels effectively",
+                                "Building balanced meals"
+                            ],
+                            "reason": "Nutrition education and awareness"
+                        })
+                        logger.info("Provided nutrition education content")
+                    
+                    else:  # NO_ACTION, FALLBACK, or unknown
+                        logger.info(f"No specific nutrition action needed for decision: {nutrition_action}")
+                        actions_taken.append("🥗 Ready to help with your nutrition questions")
+                
+                elif intent in ["comparison"]:
+                    logger.info("Processing product comparison intent with agentic decision making")
+                    
+                    # Use LLM to determine specific comparison needs
+                    comparison_action_prompt = f"""
+                    Analyze this user message about product comparison and determine what they specifically want:
+                    
+                    User message: "{state["current_message"]}"
+                    Found products: {len(state.get("retrieved_products", []))} items
+                    User dietary restrictions: {state.get("user_profile", {}).get("dietary_restrictions", [])}
+                    User budget: {state.get("user_profile", {}).get("budget_limit", "not set")}
+                    
+                    Respond with ONLY one of these actions:
+                    - FIND_ALTERNATIVES: if they want alternatives to specific products
+                    - PRICE_COMPARISON: if they want to compare prices of similar items
+                    - FEATURE_COMPARISON: if they want to compare features/specs
+                    - BRAND_COMPARISON: if they want to compare different brands
+                    - DIETARY_ALTERNATIVES: if they want alternatives that meet dietary needs
+                    - NO_ACTION: if no specific comparison is needed
+                    """
+                    
+                    comparison_action = await self._make_agentic_decision(comparison_action_prompt)
+                    
+                    # Execute determined comparison action
+                    if comparison_action in ["FIND_ALTERNATIVES", "DIETARY_ALTERNATIVES", "BRAND_COMPARISON"]:
+                        logger.info(f"Executing {comparison_action} action based on agentic decision")
+                        if state.get("retrieved_products"):
+                            alternatives_found = 0
+                            for product in state["retrieved_products"][:2]:  # Compare top 2 products
+                                product_name = product.get("name", "")
+                                if product_name:
+                                    dietary_restrictions = state.get("user_profile", {}).get("dietary_restrictions", []) if comparison_action == "DIETARY_ALTERNATIVES" else []
+                                    
+                                    tool_params = {
+                                        "product_name": product_name, 
+                                        "dietary_restrictions": dietary_restrictions
+                                    }
+                                    try:
+                                        alternatives = await find_product_alternatives.ainvoke(tool_params)
+                                        log_tool_usage("find_product_alternatives", tool_params, alternatives)
+                                        
+                                        if alternatives and not any(alt.get("error") for alt in alternatives):
+                                            alternatives_found += len([alt for alt in alternatives if not alt.get("error")])
+                                            comparison_type = "dietary-friendly" if comparison_action == "DIETARY_ALTERNATIVES" else "brand" if comparison_action == "BRAND_COMPARISON" else "general"
+                                            new_state["recommendations"].append({
+                                                "type": "alternatives",
+                                                "original_product": product,
+                                                "alternatives": alternatives,
+                                                "reason": f"{comparison_type.title()} alternatives for comparison"
+                                            })
+                                            logger.info(f"Successfully found alternatives for {product_name}")
+                                        else:
+                                            logger.warning(f"No alternatives found for {product_name}")
+                                    except Exception as e:
+                                        log_tool_usage("find_product_alternatives", tool_params, error=str(e))
+                                        logger.error(f"Failed to find alternatives for {product_name}: {e}")
+                            
+                            if alternatives_found > 0:
+                                actions_taken.append(f"🔍 Found {alternatives_found} alternative products for comparison")
+                            else:
+                                actions_taken.append("⚠️ No suitable alternatives found for your products")
+                        else:
+                            actions_taken.append("⚠️ No products found to compare - try searching for specific items first")
+                    
+                    elif comparison_action == "PRICE_COMPARISON":
+                        logger.info("Executing PRICE_COMPARISON action based on agentic decision")
+                        if state.get("retrieved_products"):
+                            products = state["retrieved_products"]
+                            # Sort by price for comparison
+                            priced_products = [p for p in products if p.get("price") is not None]
+                            if priced_products:
+                                priced_products.sort(key=lambda x: x.get("price", 0))
+                                lowest_price = priced_products[0].get("price", 0)
+                                highest_price = priced_products[-1].get("price", 0)
+                                price_range = highest_price - lowest_price
+                                
+                                new_state["recommendations"].append({
+                                    "type": "price_comparison",
+                                    "products": priced_products,
+                                    "price_range": price_range,
+                                    "lowest_price": lowest_price,
+                                    "highest_price": highest_price,
+                                    "reason": "Price comparison of found products"
+                                })
+                                actions_taken.append(f"💰 Price comparison: ${lowest_price:.2f} - ${highest_price:.2f} (range: ${price_range:.2f})")
+                                logger.info(f"Generated price comparison for {len(priced_products)} products")
+                            else:
+                                actions_taken.append("⚠️ No pricing information available for comparison")
+                        else:
+                            actions_taken.append("⚠️ No products found for price comparison")
+                    
+                    elif comparison_action == "FEATURE_COMPARISON":
+                        logger.info("Executing FEATURE_COMPARISON action based on agentic decision")
+                        if state.get("retrieved_products"):
+                            products = state["retrieved_products"][:3]  # Compare top 3
+                            new_state["recommendations"].append({
+                                "type": "feature_comparison",
+                                "products": products,
+                                "features": ["price", "rating", "brand", "category"],
+                                "reason": "Feature comparison of selected products"
+                            })
+                            actions_taken.append(f"📊 Generated feature comparison for {len(products)} products")
+                            logger.info(f"Generated feature comparison for {len(products)} products")
+                        else:
+                            actions_taken.append("⚠️ No products found for feature comparison")
+                    
+                    else:  # NO_ACTION, FALLBACK, or unknown
+                        logger.info(f"No specific comparison action needed for decision: {comparison_action}")
+                        actions_taken.append("🔍 Ready to help you compare products")
                 
                 new_state["actions_taken"] = actions_taken
                 new_state["reasoning_step"] = "action_execution"

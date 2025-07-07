@@ -44,9 +44,10 @@ class WalmartAPIClient:
             response = await self.client.get(f"{self.base_url}/api/users/{user_id}")
             if response.status_code == 200:
                 return response.json()
+            api_logger.warning(f"Failed to get user profile for {user_id}: HTTP {response.status_code}")
             return {}
         except Exception as e:
-            print(f"Error getting user profile: {e}")
+            api_logger.error(f"Error getting user profile for {user_id}: {e}")
             return {}
     
     async def get_shopping_list(self, user_id: str) -> List[Dict[str, Any]]:
@@ -55,9 +56,10 @@ class WalmartAPIClient:
             response = await self.client.get(f"{self.base_url}/api/users/{user_id}/shopping-list")
             if response.status_code == 200:
                 return response.json()
+            api_logger.warning(f"Failed to get shopping list for {user_id}: HTTP {response.status_code}")
             return []
         except Exception as e:
-            print(f"Error getting shopping list: {e}")
+            api_logger.error(f"Error getting shopping list for {user_id}: {e}")
             return []
     
     async def add_to_shopping_list(self, user_id: str, product_id: str, quantity: int = 1) -> Dict[str, Any]:
@@ -70,20 +72,76 @@ class WalmartAPIClient:
             )
             if response.status_code == 200:
                 return {"success": True, "data": response.json()}
-            return {"success": False, "error": "Failed to add item"}
+            api_logger.warning(f"Failed to add item to shopping list for {user_id}: HTTP {response.status_code}")
+            return {"success": False, "error": f"API returned status {response.status_code}"}
         except Exception as e:
-            print(f"Error adding to shopping list: {e}")
+            api_logger.error(f"Error adding to shopping list for {user_id}: {e}")
             return {"success": False, "error": str(e)}
     
+    async def remove_from_shopping_list(self, user_id: str, item_id: str) -> Dict[str, Any]:
+        """Remove a specific item from user's shopping list."""
+        try:
+            response = await self.client.delete(f"{self.base_url}/api/users/{user_id}/shopping-list/{item_id}")
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            api_logger.warning(f"Failed to remove item {item_id} for {user_id}: HTTP {response.status_code}")
+            return {"success": False, "error": f"API returned status {response.status_code}"}
+        except Exception as e:
+            api_logger.error(f"Error removing item {item_id} for {user_id}: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def clear_shopping_list(self, user_id: str) -> Dict[str, Any]:
+        """Clear all items from user's shopping list."""
+        try:
+            # First get the current shopping list
+            shopping_list = await self.get_shopping_list(user_id)
+            
+            if not shopping_list:
+                return {"success": True, "message": "Shopping list was already empty", "items_removed": 0}
+            
+            # Remove each item
+            removed_count = 0
+            failed_items = []
+            
+            for item in shopping_list:
+                item_id = item.get("id")
+                if item_id:
+                    result = await self.remove_from_shopping_list(user_id, item_id)
+                    if result.get("success"):
+                        removed_count += 1
+                    else:
+                        failed_items.append(item_id)
+            
+            if failed_items:
+                api_logger.warning(f"Partially cleared shopping list for {user_id}: {removed_count} removed, {len(failed_items)} failed")
+                return {
+                    "success": False, 
+                    "message": f"Partially cleared. {removed_count} items removed, {len(failed_items)} failed",
+                    "items_removed": removed_count,
+                    "failed_items": failed_items
+                }
+            else:
+                api_logger.info(f"Successfully cleared shopping list for {user_id}: {removed_count} items removed")
+                return {
+                    "success": True, 
+                    "message": f"Shopping list cleared successfully. {removed_count} items removed",
+                    "items_removed": removed_count
+                }
+                
+        except Exception as e:
+            api_logger.error(f"Error clearing shopping list for {user_id}: {e}")
+            return {"success": False, "error": str(e)}
+
     async def get_spending_analytics(self, user_id: str) -> Dict[str, Any]:
         """Get user's spending analytics by category."""
         try:
             response = await self.client.get(f"{self.base_url}/api/users/{user_id}/analytics/spending")
             if response.status_code == 200:
                 return response.json()
+            api_logger.warning(f"Failed to get spending analytics for {user_id}: HTTP {response.status_code}")
             return {}
         except Exception as e:
-            print(f"Error getting spending analytics: {e}")
+            api_logger.error(f"Error getting spending analytics for {user_id}: {e}")
             return {}
     
     async def create_chat_message(self, user_id: str, content: str, is_user: bool = True) -> Dict[str, Any]:
@@ -97,9 +155,10 @@ class WalmartAPIClient:
             response = await self.client.post(f"{self.base_url}/api/chat", json=data)
             if response.status_code == 200:
                 return {"success": True, "data": response.json()}
-            return {"success": False, "error": "Failed to create message"}
+            api_logger.warning(f"Failed to create chat message for {user_id}: HTTP {response.status_code}")
+            return {"success": False, "error": f"API returned status {response.status_code}"}
         except Exception as e:
-            print(f"Error creating chat message: {e}")
+            api_logger.error(f"Error creating chat message for {user_id}: {e}")
             return {"success": False, "error": str(e)}
 
 # Global instances
@@ -162,33 +221,9 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
         tool_logger.error(f"🔍 Search failed: {e}")
         return [{"error": error_msg}]
 
-@tool
-async def get_user_shopping_list(user_id: str) -> List[Dict[str, Any]]:
-    """
-    Get the user's current shopping list.
-    
-    Args:
-        user_id: User identifier
-    
-    Returns:
-        List of items in the user's shopping list
-    """
-    return await api_client.get_shopping_list(user_id)
+# Removed duplicate - using the more comprehensive version below
 
-@tool
-async def add_product_to_list(user_id: str, product_id: str, quantity: int = 1) -> Dict[str, Any]:
-    """
-    Add a product to the user's shopping list.
-    
-    Args:
-        user_id: User identifier
-        product_id: Product identifier
-        quantity: Quantity to add
-    
-    Returns:
-        Result of the add operation
-    """
-    return await api_client.add_to_shopping_list(user_id, product_id, quantity)
+# Removed duplicate - using the more comprehensive version below
 
 @tool
 async def get_user_preferences(user_id: str) -> Dict[str, Any]:
@@ -279,6 +314,69 @@ async def add_product_to_list(user_id: str, product_id: str, quantity: int = 1) 
         error_msg = f"Failed to add product to list: {str(e)}"
         log_tool_call("add_product_to_list", params, error=error_msg)
         api_logger.error(f"➕ Backend API call failed: {e}")
+        return {"success": False, "error": error_msg}
+
+@tool
+async def remove_product_from_list(user_id: str, item_id: str) -> Dict[str, Any]:
+    """
+    Remove a specific item from the user's shopping list via backend API.
+    
+    Args:
+        user_id: User identifier
+        item_id: Shopping list item identifier
+    
+    Returns:
+        Result of the remove operation
+    """
+    params = {"user_id": user_id, "item_id": item_id}
+    api_logger.info(f"➖ Removing item {item_id} from shopping list for user: {user_id}")
+    
+    try:
+        result = await api_client.remove_from_shopping_list(user_id, item_id)
+        log_tool_call("remove_product_from_list", params, result)
+        
+        if result.get("success"):
+            api_logger.info(f"➖ Item removed successfully")
+        else:
+            api_logger.warning(f"➖ Failed to remove item: {result.get('error', 'Unknown error')}")
+            
+        return result
+        
+    except Exception as e:
+        error_msg = f"Failed to remove item from list: {str(e)}"
+        log_tool_call("remove_product_from_list", params, error=error_msg)
+        api_logger.error(f"➖ Backend API call failed: {e}")
+        return {"success": False, "error": error_msg}
+
+@tool
+async def clear_shopping_list(user_id: str) -> Dict[str, Any]:
+    """
+    Clear all items from the user's shopping list via backend API.
+    
+    Args:
+        user_id: User identifier
+    
+    Returns:
+        Result of the clear operation
+    """
+    params = {"user_id": user_id}
+    api_logger.info(f"🧹 Clearing shopping list for user: {user_id}")
+    
+    try:
+        result = await api_client.clear_shopping_list(user_id)
+        log_tool_call("clear_shopping_list", params, result)
+        
+        if result.get("success"):
+            api_logger.info(f"🧹 Shopping list cleared successfully: {result.get('message', '')}")
+        else:
+            api_logger.warning(f"🧹 Failed to clear shopping list: {result.get('error', 'Unknown error')}")
+            
+        return result
+        
+    except Exception as e:
+        error_msg = f"Failed to clear shopping list: {str(e)}"
+        log_tool_call("clear_shopping_list", params, error=error_msg)
+        api_logger.error(f"🧹 Backend API call failed: {e}")
         return {"success": False, "error": error_msg}
 
 @tool
@@ -674,5 +772,7 @@ SHOPPING_ASSISTANT_TOOLS = [
     analyze_nutrition_profile,
     find_product_alternatives,
     optimize_shopping_list_for_budget,
-    save_chat_interaction
+    save_chat_interaction,
+    remove_product_from_list,
+    clear_shopping_list
 ]

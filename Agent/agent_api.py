@@ -9,14 +9,15 @@ from pydantic import BaseModel
 from typing import Dict, List, Any, Optional
 import asyncio
 import uvicorn
+from collections import defaultdict
 
 from shopping_assistant import WalmartShoppingAssistant
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Walmart Shopping Assistant API",
-    description="LangGraph-powered personalized shopping assistant",
-    version="1.0.0"
+    title="Walmart Shopping Assistant API", 
+    description="LangGraph-powered AI shopping assistant with RAG and personalized recommendations",
+    version="2.0.0"
 )
 
 # Add CORS middleware to allow frontend requests
@@ -31,12 +32,17 @@ app.add_middleware(
 # Initialize the shopping assistant
 shopping_assistant = WalmartShoppingAssistant()
 
+# In-memory session storage for chat history
+# In production, you'd want to use Redis or a database
+session_storage = defaultdict(list)
+
 # Request/Response models
 class ChatRequest(BaseModel):
     message: str
     user_id: str
     user_profile: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
+    chat_history: Optional[List[Dict[str, str]]] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -46,6 +52,7 @@ class ChatResponse(BaseModel):
     agent_thoughts: List[str]
     intent: str
     success: bool
+    chat_history: List[Dict[str, str]]
     error: Optional[str] = None
 
 class HealthResponse(BaseModel):
@@ -83,12 +90,24 @@ async def chat_with_assistant(request: ChatRequest):
         Agent response with products, recommendations, and actions
     """
     try:
-        # Call the agent
+        # Determine session key for chat history storage
+        session_key = f"{request.user_id}_{request.session_id}" if request.session_id else request.user_id
+        
+        # Get chat history from session storage or request
+        chat_history = request.chat_history or session_storage.get(session_key, [])
+        
+        # Call the agent with chat history
         result = await shopping_assistant.chat(
             user_message=request.message,
             user_id=request.user_id,
-            user_profile=request.user_profile
+            user_profile=request.user_profile,
+            chat_history=chat_history
         )
+        
+        # Update session storage with new chat history
+        if result.get("success", False):
+            updated_history = result.get("chat_history", [])
+            session_storage[session_key] = updated_history
         
         return ChatResponse(
             response=result.get("response", ""),
@@ -97,6 +116,7 @@ async def chat_with_assistant(request: ChatRequest):
             actions_taken=result.get("actions_taken", []),
             agent_thoughts=result.get("agent_thoughts", []),
             intent=result.get("intent", ""),
+            chat_history=result.get("chat_history", []),
             success=True
         )
         
@@ -109,6 +129,7 @@ async def chat_with_assistant(request: ChatRequest):
             actions_taken=[],
             agent_thoughts=[],
             intent="error",
+            chat_history=request.chat_history or [],
             success=False,
             error=str(e)
         )
@@ -178,6 +199,27 @@ async def get_spending_analytics(user_id: str):
         from shopping_tools import api_client
         analytics = await api_client.get_spending_analytics(user_id)
         return {"success": True, "analytics": analytics}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/chat/{user_id}/history")
+async def clear_chat_history(user_id: str, session_id: Optional[str] = None):
+    """Clear chat history for a user session."""
+    try:
+        session_key = f"{user_id}_{session_id}" if session_id else user_id
+        if session_key in session_storage:
+            del session_storage[session_key]
+        return {"success": True, "message": "Chat history cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat/{user_id}/history")
+async def get_chat_history(user_id: str, session_id: Optional[str] = None):
+    """Get chat history for a user session."""
+    try:
+        session_key = f"{user_id}_{session_id}" if session_id else user_id
+        history = session_storage.get(session_key, [])
+        return {"success": True, "chat_history": history, "count": len(history)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
