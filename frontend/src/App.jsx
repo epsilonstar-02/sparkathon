@@ -3,6 +3,7 @@ import Chat from './pages/Chat'
 import Dashboard from './pages/Dashboard'
 import Map from './pages/Map'
 import Map3D from './pages/Map3D'
+import { createContext } from 'react'
 
 function Navbar() {
   const location = useLocation()
@@ -34,18 +35,22 @@ function Navbar() {
   )
 }
 
+export const PremiumUserContext = createContext({ isPremium: true })
+
 export default function App() {
   return (
-    <div className="min-h-screen font-sans bg-gradient-to-br from-blue-50 via-white to-blue-100">
-      <Navbar />
-      <div className="max-w-6xl mx-auto px-4">
-        <Routes>
-          <Route path="/" element={<Chat />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/map" element={<Map />} />
-          <Route path="/map3d" element={<Map3D />} />
-        </Routes>
+    <PremiumUserContext.Provider value={{ isPremium: true }}>
+      <div className="min-h-screen font-sans bg-gradient-to-br from-blue-50 via-white to-blue-100">
+        <Navbar />
+        <div className="max-w-6xl mx-auto px-4">
+          <Routes>
+            <Route path="/" element={<Chat />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/map" element={<Map />} />
+            <Route path="/map3d" element={<Map3D />} />
+          </Routes>
+        </div>
       </div>
-    </div>
+    </PremiumUserContext.Provider>
   )
 }
