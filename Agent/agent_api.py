@@ -32,9 +32,9 @@ app.add_middleware(
 # Initialize the shopping assistant
 shopping_assistant = WalmartShoppingAssistant()
 
-# In-memory session storage for chat history
+# In-memory session storage for chat history and context
 # In production, you'd want to use Redis or a database
-session_storage = defaultdict(list)
+session_storage = defaultdict(lambda: {"chat_history": [], "recent_products": [], "last_search_context": ""})
 
 # Request/Response models
 class ChatRequest(BaseModel):
@@ -93,22 +93,31 @@ async def chat_with_assistant(request: ChatRequest):
         # Determine session key for chat history storage
         session_key = f"{request.user_id}_{request.session_id}" if request.session_id else request.user_id
         
-        # Get chat history from session storage or request
-        chat_history = request.chat_history or session_storage.get(session_key, [])
+        # Get session data from storage
+        session_data = session_storage[session_key]
+        chat_history = request.chat_history or session_data["chat_history"]
+        recent_products = session_data["recent_products"]
         
-        # Call the agent with chat history
+        # Call the agent with chat history and recent products
         result = await shopping_assistant.chat(
             user_message=request.message,
             user_id=request.user_id,
             user_profile=request.user_profile,
-            chat_history=chat_history
+            chat_history=chat_history,
+            recent_products=recent_products  # Pass recent products from session
         )
         
-        # Update session storage with new chat history
+        # Update session storage with new data
         if result.get("success", False):
-            updated_history = result.get("chat_history", [])
-            session_storage[session_key] = updated_history
-        
+            session_data["chat_history"] = result.get("chat_history", [])
+            
+            # Store recent products for future use
+            current_products = result.get("products", [])
+            if current_products:
+                # Keep last 20 products to avoid memory bloat
+                session_data["recent_products"] = current_products[-20:]
+                session_data["last_search_context"] = request.message
+            
         return ChatResponse(
             response=result.get("response", ""),
             products=result.get("products", []),
@@ -222,6 +231,27 @@ async def get_chat_history(user_id: str, session_id: Optional[str] = None):
         return {"success": True, "chat_history": history, "count": len(history)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug/session/{user_id}")
+async def debug_session(user_id: str, session_id: Optional[str] = None):
+    """Debug endpoint to check session data."""
+    session_key = f"{user_id}_{session_id}" if session_id else user_id
+    session_data = session_storage[session_key]
+    
+    return {
+        "session_key": session_key,
+        "chat_history_length": len(session_data["chat_history"]),
+        "recent_products_count": len(session_data["recent_products"]),
+        "last_search_context": session_data["last_search_context"],
+        "recent_products_preview": [
+            {
+                "name": p.get("name", "Unknown"),
+                "price": p.get("price", "N/A"),
+                "id": p.get("id", "N/A")
+            }
+            for p in session_data["recent_products"][:3]  # Show first 3
+        ] if session_data["recent_products"] else []
+    }
 
 if __name__ == "__main__":
     print("🚀 Starting Walmart Shopping Assistant API...")

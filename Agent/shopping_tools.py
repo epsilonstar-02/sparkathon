@@ -6,6 +6,7 @@ Tools for interacting with the backend API, ChromaDB, and performing shopping ta
 import asyncio
 import httpx
 import logging
+import time
 from typing import Dict, List, Any, Optional
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -20,63 +21,186 @@ api_logger = logging.getLogger("BackendAPI")
 def log_tool_call(tool_name: str, params: Dict[str, Any], result: Any = None, error: str = None):
     """Log tool calls with parameters and results."""
     if error:
-        tool_logger.error(f"🔧 {tool_name} FAILED: {error} | Params: {params}")
+        tool_logger.error(f"🚨 {tool_name} FAILED with params {params}: {error}")
     else:
-        tool_logger.info(f"🔧 {tool_name} CALLED | Params: {params}")
-        if result:
-            if isinstance(result, list):
-                tool_logger.info(f"🔧 {tool_name} RESULT: {len(result)} items returned")
-            elif isinstance(result, dict):
+        tool_logger.info(f"🔧 {tool_name} called with params: {params}")
+        if isinstance(result, dict):
+            if result:
+                tool_logger.info(f"🔧 {tool_name} RESULT: {list(result.keys())}")
+            else:
+                tool_logger.info(f"🔧 {tool_name} RESULT: {type(result).__name__}")
+        elif isinstance(result, list):
+            tool_logger.info(f"🔧 {tool_name} RESULT: {len(result)} items")
+        else:
+            if result:
                 tool_logger.info(f"🔧 {tool_name} RESULT: {list(result.keys())}")
             else:
                 tool_logger.info(f"🔧 {tool_name} RESULT: {type(result).__name__}")
 
+# Circuit Breaker implementation
+class CircuitBreaker:
+    """Circuit breaker pattern to prevent cascading failures."""
+    
+    def __init__(self, failure_threshold: int = 5, timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
+    
+    def is_open(self) -> bool:
+        """Check if circuit breaker is open."""
+        if self.state == 'OPEN':
+            if time.time() - self.last_failure_time > self.timeout:
+                self.state = 'HALF_OPEN'
+                return False
+            return True
+        return False
+    
+    def record_success(self):
+        """Record successful call."""
+        self.failure_count = 0
+        self.state = 'CLOSED'
+    
+    def record_failure(self):
+        """Record failed call."""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= self.failure_threshold:
+            self.state = 'OPEN'
+
 class WalmartAPIClient:
-    """Client for interacting with the FastAPI backend."""
+    """Client for interacting with the FastAPI backend with circuit breaker protection."""
     
     def __init__(self, base_url: str = Config.BACKEND_BASE_URL):
         self.base_url = base_url.rstrip('/')
-        self.client = httpx.AsyncClient()
+        self.circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60)
+        # Configure httpx client with proper timeouts and connection limits
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),  # 30s total, 10s connect
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Walmart-Shopping-Assistant/1.0",
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+        )
     
     async def get_user_profile(self, user_id: str) -> Dict[str, Any]:
-        """Get user profile and shopping history."""
-        try:
-            response = await self.client.get(f"{self.base_url}/api/users/{user_id}")
-            if response.status_code == 200:
-                return response.json()
-            api_logger.warning(f"Failed to get user profile for {user_id}: HTTP {response.status_code}")
-            return {}
-        except Exception as e:
-            api_logger.error(f"Error getting user profile for {user_id}: {e}")
-            return {}
+        """Get user profile and shopping history with retry logic and circuit breaker."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if self.circuit_breaker.is_open():
+                    api_logger.warning(f"Circuit breaker is OPEN for user profile request: {user_id}")
+                    return {}
+                
+                response = await self._make_request("GET", f"{self.base_url}/api/users/{user_id}")
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    api_logger.warning(f"User not found: {user_id}")
+                    return {}
+                elif response.status_code >= 500:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    api_logger.warning(f"Server error getting user profile for {user_id}: HTTP {response.status_code}")
+                    return {}
+                else:
+                    api_logger.warning(f"Failed to get user profile for {user_id}: HTTP {response.status_code}")
+                    return {}
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                api_logger.warning(f"Network error getting user profile for {user_id} (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return {}
+            except Exception as e:
+                if "Circuit breaker is OPEN" in str(e):
+                    api_logger.warning(f"Circuit breaker prevented request for user {user_id}")
+                    return {}
+                api_logger.error(f"Error getting user profile for {user_id}: {e}")
+                return {}
     
     async def get_shopping_list(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get user's current shopping list."""
-        try:
-            response = await self.client.get(f"{self.base_url}/api/users/{user_id}/shopping-list")
-            if response.status_code == 200:
-                return response.json()
-            api_logger.warning(f"Failed to get shopping list for {user_id}: HTTP {response.status_code}")
-            return []
-        except Exception as e:
-            api_logger.error(f"Error getting shopping list for {user_id}: {e}")
-            return []
+        """Get user's current shopping list with retry logic."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.get(f"{self.base_url}/api/users/{user_id}/shopping-list")
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    api_logger.warning(f"User not found: {user_id}")
+                    return []
+                elif response.status_code >= 500:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    api_logger.warning(f"Server error getting shopping list for {user_id}: HTTP {response.status_code}")
+                    return []
+                else:
+                    api_logger.warning(f"Failed to get shopping list for {user_id}: HTTP {response.status_code}")
+                    return []
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                api_logger.warning(f"Network error getting shopping list for {user_id} (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return []
+            except Exception as e:
+                api_logger.error(f"Error getting shopping list for {user_id}: {e}")
+                return []
     
     async def add_to_shopping_list(self, user_id: str, product_id: str, quantity: int = 1) -> Dict[str, Any]:
         """Add item to user's shopping list."""
-        try:
-            data = {"product_id": product_id, "quantity": quantity}
-            response = await self.client.post(
-                f"{self.base_url}/api/users/{user_id}/shopping-list",
-                json=data
-            )
-            if response.status_code == 200:
-                return {"success": True, "data": response.json()}
-            api_logger.warning(f"Failed to add item to shopping list for {user_id}: HTTP {response.status_code}")
-            return {"success": False, "error": f"API returned status {response.status_code}"}
-        except Exception as e:
-            api_logger.error(f"Error adding to shopping list for {user_id}: {e}")
-            return {"success": False, "error": str(e)}
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Use 'product_id' as required by backend API
+                data = {"product_id": product_id, "quantity": quantity}
+                response = await self.client.post(
+                    f"{self.base_url}/api/users/{user_id}/shopping-list",
+                    json=data
+                )
+                if response.status_code == 200:
+                    return {"success": True, "data": response.json()}
+                elif response.status_code == 404:
+                    api_logger.warning(f"User or product not found for {user_id}: {product_id}")
+                    return {"success": False, "error": "User or product not found"}
+                elif response.status_code >= 500:
+                    api_logger.warning(f"Server error adding item to shopping list for {user_id}: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        continue
+                    return {"success": False, "error": f"Server error: {response.status_code}"}
+                else:
+                    api_logger.warning(f"Failed to add item to shopping list for {user_id}: HTTP {response.status_code}")
+                    error_details = ""
+                    try:
+                        error_response = response.json()
+                        error_details = f" - {error_response}"
+                    except:
+                        error_details = f" - {response.text}"
+                    api_logger.warning(f"Response details: {error_details}")
+                    return {"success": False, "error": f"API returned status {response.status_code}{error_details}"}
+            except httpx.TimeoutException:
+                api_logger.warning(f"Timeout adding item to shopping list for {user_id} (attempt {attempt + 1})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return {"success": False, "error": "Request timeout"}
+            except httpx.ConnectError:
+                api_logger.error(f"Connection error adding item to shopping list for {user_id} (attempt {attempt + 1})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return {"success": False, "error": "Connection error"}
+            except Exception as e:
+                api_logger.error(f"Error adding to shopping list for {user_id}: {e}")
+                return {"success": False, "error": str(e)}
     
     async def remove_from_shopping_list(self, user_id: str, item_id: str) -> Dict[str, Any]:
         """Remove a specific item from user's shopping list."""
@@ -91,7 +215,7 @@ class WalmartAPIClient:
             return {"success": False, "error": str(e)}
     
     async def clear_shopping_list(self, user_id: str) -> Dict[str, Any]:
-        """Clear all items from user's shopping list."""
+        """Clear all items from user's shopping list using concurrent requests."""
         try:
             # First get the current shopping list
             shopping_list = await self.get_shopping_list(user_id)
@@ -99,23 +223,36 @@ class WalmartAPIClient:
             if not shopping_list:
                 return {"success": True, "message": "Shopping list was already empty", "items_removed": 0}
             
-            # Remove each item
-            removed_count = 0
-            failed_items = []
-            
+            # Remove all items concurrently for better performance
+            removal_tasks = []
             for item in shopping_list:
                 item_id = item.get("id")
                 if item_id:
-                    result = await self.remove_from_shopping_list(user_id, item_id)
-                    if result.get("success"):
-                        removed_count += 1
-                    else:
-                        failed_items.append(item_id)
+                    removal_tasks.append(self.remove_from_shopping_list(user_id, item_id))
+            
+            if not removal_tasks:
+                return {"success": True, "message": "Shopping list was already empty", "items_removed": 0}
+            
+            # Execute all removal requests concurrently
+            results = await asyncio.gather(*removal_tasks, return_exceptions=True)
+            
+            # Count successful removals
+            removed_count = 0
+            failed_items = []
+            
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    failed_items.append(shopping_list[i].get("id", f"item_{i}"))
+                    api_logger.error(f"Exception removing item {i}: {result}")
+                elif isinstance(result, dict) and result.get("success"):
+                    removed_count += 1
+                else:
+                    failed_items.append(shopping_list[i].get("id", f"item_{i}"))
             
             if failed_items:
                 api_logger.warning(f"Partially cleared shopping list for {user_id}: {removed_count} removed, {len(failed_items)} failed")
                 return {
-                    "success": False, 
+                    "success": removed_count > 0,  # Partial success if some items were removed
                     "message": f"Partially cleared. {removed_count} items removed, {len(failed_items)} failed",
                     "items_removed": removed_count,
                     "failed_items": failed_items
@@ -161,6 +298,40 @@ class WalmartAPIClient:
             api_logger.error(f"Error creating chat message for {user_id}: {e}")
             return {"success": False, "error": str(e)}
 
+    async def close(self):
+        """Close the HTTP client and cleanup resources."""
+        if self.client:
+            await self.client.aclose()
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+    
+    def __del__(self):
+        """Destructor to ensure client is closed."""
+        if hasattr(self, 'client') and self.client:
+            # Note: In production, you should ensure proper async cleanup
+            # This is a safety net for cases where close() wasn't called
+            import warnings
+            warnings.warn("WalmartAPIClient was not properly closed. Use 'await client.close()' or async context manager.")
+
+    async def _make_request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make HTTP request with circuit breaker protection."""
+        if self.circuit_breaker.is_open():
+            raise Exception("Circuit breaker is OPEN - too many recent failures")
+        
+        try:
+            response = await getattr(self.client, method.lower())(url, **kwargs)
+            self.circuit_breaker.record_success()
+            return response
+        except Exception as e:
+            self.circuit_breaker.record_failure()
+            raise e
+
 # Global instances
 api_client = WalmartAPIClient()
 # product_searcher will be injected from the assistant
@@ -195,20 +366,44 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
             log_tool_call("search_products_semantic", params, error=error)
             return [{"error": error}]
         
-        results = _product_searcher.search(query, n_results=max_results)
+        results = _product_searcher.search(query, n_results=max_results, min_similarity=0.1)
         
         formatted_products = []
         for product in results.get("results", []):
             metadata = product.get("metadata", {})
+            
+            # Calculate similarity score based on distance metric
+            distance = product.get("distance", 0)
+            
+            # Check what distance metric was used
+            try:
+                if _product_searcher and hasattr(_product_searcher, 'collection'):
+                    collection_config = _product_searcher.collection._client.get_collection(_product_searcher.collection.name).configuration_json
+                    distance_metric = collection_config['hnsw']['space']
+                else:
+                    distance_metric = 'l2'  # fallback
+            except:
+                distance_metric = 'l2'  # fallback
+            
+            if distance_metric == 'cosine':
+                # For cosine: distance = 1 - cosine_similarity, so similarity = 1 - distance
+                similarity_score = max(0, 1 - distance)
+            else:
+                # For L2: use inverse relationship: similarity = 1 / (1 + distance)
+                similarity_score = 1 / (1 + distance) if distance >= 0 else 0
+            
             formatted_products.append({
-                "id": product.get("id"),
+                "id": metadata.get("product_id"),  # Use PostgreSQL ID from metadata, not ChromaDB ID
+                "chroma_id": product.get("id"),   # Keep ChromaDB ID for reference if needed
                 "name": metadata.get("brand", "Unknown") + " " + product.get("document", "").split("|")[0].replace("Product: ", ""),
                 "category": metadata.get("category"),
                 "price": metadata.get("price"),
                 "currency": metadata.get("currency", "USD"),
                 "rating": metadata.get("rating"),
                 "availability": metadata.get("availability"),
-                "similarity_score": 1 - product.get("distance", 0)
+                "similarity_score": similarity_score,
+                "distance": distance,
+                "distance_metric": distance_metric
             })
         
         log_tool_call("search_products_semantic", params, formatted_products)

@@ -566,7 +566,33 @@ class WalmartShoppingAssistant:
                             else:
                                 logger.warning("No products found in conversation context")
                         
-                        products_to_add = new_state.get("retrieved_products", [])[:5]  # Add top 5
+                        # Get products to add - either existing retrieved_products or search for specific items
+                        products_to_add = new_state.get("retrieved_products", [])
+                        
+                        # If still no products, try to search for specific items mentioned in the message
+                        if not products_to_add and shopping_action == "ADD_PRODUCTS":
+                            logger.info("No retrieved products found, searching for items mentioned in message")
+                            # Extract item names from the user message
+                            user_message = state["current_message"].lower()
+                            item_keywords = ["greek yogurt", "yogurt", "bananas", "banana", "milk", "bread", "eggs", "chicken", "pasta", "rice"]
+                            mentioned_items = [item for item in item_keywords if item in user_message]
+                            
+                            if mentioned_items:
+                                search_query = " ".join(mentioned_items)
+                                search_params = {"query": search_query, "max_results": 5}
+                                try:
+                                    searched_products = await search_products_semantic.ainvoke(search_params)
+                                    log_tool_usage("search_products_semantic (items)", search_params, searched_products)
+                                    products_to_add = searched_products
+                                    new_state["retrieved_products"] = searched_products
+                                    actions_taken.append(f"🔍 Found {len(searched_products)} products matching: {search_query}")
+                                    logger.info(f"Found {len(searched_products)} products for mentioned items: {search_query}")
+                                except Exception as e:
+                                    log_tool_usage("search_products_semantic (items)", search_params, error=str(e))
+                                    logger.error(f"Failed to search for mentioned items: {e}")
+                        
+                        # Limit to top 5 products to avoid overwhelming the user
+                        products_to_add = products_to_add[:5] if products_to_add else []
                         
                         if not products_to_add:
                             actions_taken.append("⚠️ I don't see any specific items to add. Could you please specify what products you'd like in your cart?")
@@ -1208,7 +1234,8 @@ class WalmartShoppingAssistant:
     
     async def chat(self, user_message: str, user_id: str = "default_user", 
                    user_profile: Optional[Dict] = None, 
-                   chat_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                   chat_history: Optional[List[Dict]] = None,
+                   recent_products: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Main chat interface for the shopping assistant.
         
@@ -1228,7 +1255,7 @@ class WalmartShoppingAssistant:
         logger.info(f"Chat history length: {len(chat_history) if chat_history else 0}")
         logger.info(f"User profile provided: {bool(user_profile)}")
         
-        # Initialize state with conversation history
+        # Initialize state with conversation history and recent products
         initial_state = ShoppingAssistantState(
             user_id=user_id,
             user_profile=user_profile or {},
@@ -1237,7 +1264,7 @@ class WalmartShoppingAssistant:
             shopping_list=[],
             current_intent="",
             search_query="",
-            retrieved_products=[],
+            retrieved_products=recent_products or [],  # Start with recent products from session
             agent_thoughts=[],
             reasoning_step="",
             recommendations=[],
@@ -1300,9 +1327,10 @@ class WalmartShoppingAssistant:
     
     def chat_sync(self, user_message: str, user_id: str = "default_user", 
                   user_profile: Optional[Dict] = None, 
-                  chat_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                  chat_history: Optional[List[Dict]] = None,
+                  recent_products: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """Synchronous wrapper for the chat method."""
-        return asyncio.run(self.chat(user_message, user_id, user_profile, chat_history))
+        return asyncio.run(self.chat(user_message, user_id, user_profile, chat_history, recent_products))
 
 
 # Example usage and testing

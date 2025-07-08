@@ -39,7 +39,8 @@ class ProductSearcher:
     def search(self, 
                query: str, 
                n_results: int = 5,
-               filter_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               filter_metadata: Optional[Dict[str, Any]] = None,
+               min_similarity: float = 0.7) -> Dict[str, Any]:
         """
         Search for products using natural language query
         
@@ -47,6 +48,7 @@ class ProductSearcher:
             query: Natural language search query
             n_results: Number of results to return
             filter_metadata: Optional metadata filters (e.g., {"category": "Video Game Consoles"})
+            min_similarity: Minimum cosine similarity threshold for results (default 0.7)
             
         Returns:
             Dictionary containing search results
@@ -54,13 +56,45 @@ class ProductSearcher:
         # Perform the search
         results = self.collection.query(
             query_texts=[query],
-            n_results=n_results,
+            n_results=n_results * 2,  # Overfetch to allow filtering
             where=filter_metadata
         )
+        # Check distance metric and filter accordingly
+        try:
+            collection_config = self.collection._client.get_collection(self.collection.name).configuration_json
+            distance_metric = collection_config['hnsw']['space']
+        except:
+            distance_metric = 'l2'  # fallback
         
+        if distance_metric == 'cosine':
+            # For cosine similarity: distance = 1 - cosine_similarity, so similarity = 1 - distance
+            filtered = [
+                (doc_id, document, metadata, distance)
+                for doc_id, document, metadata, distance in zip(
+                    results['ids'][0],
+                    results['documents'][0],
+                    results['metadatas'][0],
+                    results['distances'][0]
+                )
+                if (1 - distance) >= min_similarity
+            ]
+        else:
+            # For L2 distance: use distance threshold (smaller is better)
+            max_distance = 2.0 - min_similarity * 2.0  # Convert similarity to distance threshold
+            filtered = [
+                (doc_id, document, metadata, distance)
+                for doc_id, document, metadata, distance in zip(
+                    results['ids'][0],
+                    results['documents'][0],
+                    results['metadatas'][0],
+                    results['distances'][0]
+                )
+                if distance <= max_distance
+            ]
+        filtered = filtered[:n_results]
         return {
             'query': query,
-            'n_results': len(results['ids'][0]),
+            'n_results': len(filtered),
             'results': [
                 {
                     'id': doc_id,
@@ -68,12 +102,7 @@ class ProductSearcher:
                     'metadata': metadata,
                     'distance': distance
                 }
-                for doc_id, document, metadata, distance in zip(
-                    results['ids'][0],
-                    results['documents'][0],
-                    results['metadatas'][0],
-                    results['distances'][0]
-                )
+                for doc_id, document, metadata, distance in filtered
             ]
         }
     

@@ -35,11 +35,38 @@ class ProductIngestor:
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         print("Embedding model loaded successfully!")
         
-        # Create or get collection
-        self.collection = self.client.get_or_create_collection(
-            name="products",
-            metadata={"description": "Product embeddings for RAG"}
-        )
+        # Create or get collection with cosine similarity for better text similarity
+        # Note: If collection exists with different distance metric, it needs to be recreated
+        collection_name = "products"
+        try:
+            # Try to get existing collection and check its distance metric
+            existing_collection = self.client.get_collection(collection_name)
+            config = existing_collection._client.get_collection(collection_name).configuration_json
+            current_space = config['hnsw']['space']
+            
+            if current_space != 'cosine':
+                print(f"Existing collection uses {current_space} distance. Recreating with cosine similarity...")
+                self.client.delete_collection(collection_name)
+                raise ValueError("Collection recreated")
+            else:
+                print("Using existing collection with cosine similarity")
+                self.collection = existing_collection
+        except:
+            # Create new collection with cosine similarity
+            print("Creating new collection with cosine similarity...")
+            self.collection = self.client.create_collection(
+                name=collection_name,
+                metadata={"description": "Product embeddings for RAG with cosine similarity", "distance_metric": "cosine"}
+            )
+            
+            # Verify the distance metric was set correctly
+            config = self.collection._client.get_collection(collection_name).configuration_json
+            print(f"Collection created with distance metric: {config['hnsw']['space']}")
+            
+            # If still not cosine, we need to specify it differently
+            if config['hnsw']['space'] != 'cosine':
+                print("Warning: Default distance metric is not cosine. ChromaDB may default to L2.")
+                print("The search logic will handle this appropriately.")
     
     def load_products(self) -> pd.DataFrame:
         """Load products from CSV file"""
