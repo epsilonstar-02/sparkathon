@@ -84,6 +84,49 @@ def log_tool_usage(tool_name: str, params: Dict[str, Any], result: Any = None, e
                 tool_logger.info(f"Tool '{tool_name}' returned: {type(result).__name__}")
 
 # State schema for the agent
+class ConversationState:
+    """Manages conversation context for better shopping assistance continuity."""
+
+    def __init__(self):
+        self.last_products = []
+        self.last_search_intent = ""
+        self.last_recommendations = []
+        self.last_action_context = {}
+        self.context_score = 0.0
+
+    def update_products(self, products, intent):
+        """Update product context with recent search results."""
+        self.last_products = products[-10:] if products else []  # Keep last 10
+        self.last_search_intent = intent
+        self.context_score = 1.0  # Fresh context
+
+    def update_recommendations(self, recommendations):
+        """Update recommendation context."""
+        self.last_recommendations = recommendations[-5:] if recommendations else []
+
+    def update_action_context(self, action, items):
+        """Track the last action taken for better context."""
+        self.last_action_context = {
+            "action": action,
+            "items": items,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    def get_contextual_products(self):
+        """Get products from recent context with relevance scoring."""
+        if self.context_score > 0.3:  # Context is still relevant
+            return self.last_products
+        return []
+
+    def decay_context(self):
+        """Gradually reduce context relevance over time."""
+        self.context_score *= 0.8  # Decay factor
+
+    def has_valid_context(self):
+        """Check if context is still valid for reference resolution."""
+        return self.context_score > 0.3 and len(self.last_products) > 0
+
+# State schema for the agent
 class ShoppingAssistantState(TypedDict):
     """State schema for the shopping assistant agent."""
     # User context
@@ -107,6 +150,9 @@ class ShoppingAssistantState(TypedDict):
     actions_taken: List[str]
     api_responses: List[Dict[str, Any]]
     final_response: str
+
+    # Context persistence (new)
+    conversation_context: Optional[ConversationState]
 
 class WalmartShoppingAssistant:
     """
@@ -139,7 +185,7 @@ class WalmartShoppingAssistant:
             Analyze the user's message and determine their primary intent, considering the conversation history.
             
             Possible intents:
-            - product_discovery: Looking for specific products or asking "what do you have"
+            - product_discovery: Looking for specific products, asking "what do you have", or requesting ingredients for dishes/meals
             - shopping_list_management: Adding/removing/clearing items from shopping list, viewing list
             - meal_planning: Planning meals, asking for recipes, meal prep
             - budget_analysis: Questions about spending, budget optimization
@@ -147,28 +193,32 @@ class WalmartShoppingAssistant:
             - general_chat: Casual conversation, greetings, general questions, follow-up responses
             - comparison: Comparing products or asking for alternatives
             
-            Pay special attention to shopping list management - this includes:
+            IMPORTANT CLASSIFICATION RULES:
+            
+            For PRODUCT_DISCOVERY (includes ingredient requests):
+            - "I want chicken salad" = product_discovery (searching for ingredients)
+            - "Find me pasta ingredients" = product_discovery
+            - "What snacks do you have" = product_discovery
+            - "I need ingredients for dinner" = product_discovery
+            
+            For SHOPPING_LIST_MANAGEMENT:
             - Clear/empty/reset my list
             - I don't need these anymore
-            - Start fresh
-            - Remove everything
-            - Show me my list
+            - Start fresh / Remove everything
+            - Show me my list / View my cart
             - Add these to my cart/list
             - Add those items to my cart
-            - Add the meal plan to my cart
             - Put those in my cart
+            - "Add them all" or "add the ingredients"
             
             CONTEXT AWARENESS: If the conversation history shows that the assistant just provided:
+            - Product recommendations or ingredient lists
             - A meal plan, recipes, or meal suggestions
-            - A list of products or ingredients
-            - Shopping recommendations
             
             And the user now says something like:
-            - "add those to my cart"
-            - "add these items"
-            - "put those in my list"
-            - "I'll take those"
-            - "add them to my cart"
+            - "add those to my cart" / "add these items" / "put those in my list"
+            - "I'll take those" / "add them to my cart" / "add everything"
+            - "add the ingredients" / "add all of those"
             
             Then classify this as "shopping_list_management" because they're referring to previously mentioned items.
             
@@ -179,15 +229,34 @@ class WalmartShoppingAssistant:
             """)
         ])
         
-        # Response generation prompt with conversation history
         self.response_prompt = ChatPromptTemplate.from_messages([
-            ("system", Config.AGENT_PERSONALITY),
+            ("system", """You are a helpful Walmart shopping assistant. Your role is to provide personalized, clear, and actionable responses to users about their shopping needs.
+
+            CORE PRINCIPLES:
+            1. Be conversational and friendly
+            2. Explain your reasoning clearly
+            3. When you find products, specify what search strategy you used
+            4. If you add items to cart, explain what you added and why
+            5. For dish requests (like "chicken salad"), explain that you searched for the complete set of ingredients
+            6. Always be specific about what actions you took
+            
+            RESPONSE GUIDELINES:
+            - If you performed a comprehensive search for a dish, mention the main ingredient and supporting ingredients
+            - If you added items to their cart, list the key items and explain the reasoning
+            - If you filtered results, mention the filters applied (dietary restrictions, budget)
+            - Use emojis appropriately to make responses engaging
+            - Always end with an offer to help further or adjust the selection"""),
             ("human", """
             User ID: {user_id}
             User Profile: {user_profile}
             Conversation History: {chat_history}
             Current Message: {current_message}
             Intent: {current_intent}
+            
+            Search Strategy Used: {search_strategy}
+            Is Dish Request: {is_dish_request}
+            Primary Search: {primary_search}
+            Secondary Searches: {secondary_searches}
             
             Retrieved Products: {retrieved_products}
             Current Shopping List: {shopping_list}
@@ -196,7 +265,7 @@ class WalmartShoppingAssistant:
             
             Based on the conversation history and current context, provide a helpful and personalized response to the user.
             Be conversational, specific, and actionable. Reference previous parts of the conversation when relevant.
-            If you've found products or made changes to their shopping list, mention them specifically.
+            Explain your search strategy and what you found. If you've made changes to their shopping list, mention them specifically.
             """)
         ])
     
@@ -242,6 +311,15 @@ class WalmartShoppingAssistant:
             state = self._add_thought(state, f"Analyzing user intent for: '{state['current_message']}'")
             
             try:
+                # Initialize conversation context if not present
+                if not state.get("conversation_context"):
+                    new_state = dict(state)
+                    new_state["conversation_context"] = ConversationState()
+                else:
+                    new_state = dict(state)
+                    # Decay context over time
+                    new_state["conversation_context"].decay_context()
+
                 # Format chat history for the prompt
                 chat_history_text = ""
                 if state.get("chat_history"):
@@ -252,8 +330,26 @@ class WalmartShoppingAssistant:
                         history_items.append(f"{role}: {content}")
                     chat_history_text = "\n".join(history_items)
                 
+                # Enhanced intent classification with context scoring
+                message_lower = state["current_message"].lower()
+                context_score = 0.0
+
+                # Check if we have valid conversation context
+                if new_state["conversation_context"].has_valid_context():
+                    context_score = new_state["conversation_context"].context_score
+                    state = self._add_thought(state, f"Valid context available (score: {context_score:.2f})")
+
+                # Enhanced pattern matching for context-aware phrases
+                contextual_add_phrases = [
+                    "add those", "add these", "add them", "put those", "put these",
+                    "add the ingredients", "add everything", "i'll take those",
+                    "add all of those", "put them in my cart", "add to my list"
+                ]
+
+                is_contextual_add = any(phrase in message_lower for phrase in contextual_add_phrases)
+
                 # Use LLM to classify intent with conversation context
-                logger.info("LLM API call: Intent classification for user message.")
+                logger.info("LLM API call: Enhanced intent classification with context.")
                 response = self.llm.invoke(
                     self.intent_prompt.format_messages(
                         chat_history=chat_history_text,
@@ -262,12 +358,19 @@ class WalmartShoppingAssistant:
                 )
                 intent = response.content.strip().lower()
                 
-                # Fallback pattern matching for better accuracy in testing
-                message_lower = state["current_message"].lower()
-                if intent not in ["product_discovery", "shopping_list_management", "meal_planning", 
+                # Apply context-weighted intent scoring
+                if is_contextual_add and context_score > 0.3:
+                    # Override LLM decision if we have strong context and contextual language
+                    intent = "shopping_list_management"
+                    new_state = self._add_thought(new_state, f"Context override: detected contextual add with score {context_score:.2f}")
+
+                # Enhanced fallback pattern matching
+                if intent not in ["product_discovery", "shopping_list_management", "meal_planning",
                                 "budget_analysis", "nutrition_analysis", "general_chat", "comparison"]:
-                    # Apply pattern matching as fallback
+                    # Apply enhanced pattern matching as fallback
                     if any(keyword in message_lower for keyword in ["clear", "empty", "remove", "delete shopping list", "reset list"]):
+                        intent = "shopping_list_management"
+                    elif is_contextual_add:
                         intent = "shopping_list_management"
                     elif any(keyword in message_lower for keyword in ["meal", "recipe", "dinner", "breakfast", "lunch", "plan meals"]):
                         intent = "meal_planning"
@@ -275,19 +378,20 @@ class WalmartShoppingAssistant:
                         intent = "general_chat"
                     elif any(keyword in message_lower for keyword in ["budget", "spend", "cost", "money"]):
                         intent = "budget_analysis"
-                    elif any(keyword in message_lower for keyword in ["snack", "food", "product", "find", "buy", "need"]):
+                    elif any(food_phrase in message_lower for food_phrase in ["chicken salad", "pasta dinner", "sandwich ingredients", "breakfast bowl"]):
+                        intent = "product_discovery"  # These are complex food requests
+                    elif any(keyword in message_lower for keyword in ["snack", "food", "product", "find", "buy", "need", "want", "ingredients", "salad"]):
                         intent = "product_discovery"
                     else:
                         intent = "general_chat"
                 
-                # Create updated state
-                new_state = dict(state)
+                # Update state
                 new_state["current_intent"] = intent
                 new_state["reasoning_step"] = "intent_analysis"
                 
                 new_state = self._add_thought(new_state, f"Detected intent: {intent}")
                 
-                # Extract search query for product-related intents or continuation of meal planning
+                # Extract search query for product-related intents
                 if intent in ["product_discovery", "comparison", "meal_planning"]:
                     new_state["search_query"] = state["current_message"]
                 elif intent == "general_chat" and chat_history_text and "meal" in chat_history_text.lower():
@@ -302,13 +406,15 @@ class WalmartShoppingAssistant:
                 state = self._add_thought(state, f"Error in intent analysis: {str(e)}")
                 new_state = dict(state)
                 new_state["current_intent"] = "general_chat"
+                if not new_state.get("conversation_context"):
+                    new_state["conversation_context"] = ConversationState()
                 return new_state
         
         async def discover_products(state: ShoppingAssistantState) -> ShoppingAssistantState:
-            """Use advanced tools to find and filter relevant products."""
+            """Use advanced tools to find and filter relevant products with intelligent query decomposition."""
             query = state['search_query']
-            logger.info(f"Starting product discovery for query: '{query}'")
-            state = self._add_thought(state, f"Searching for products: '{query}'")
+            logger.info(f"Starting intelligent product discovery for query: '{query}'")
+            state = self._add_thought(state, f"Analyzing and decomposing query: '{query}'")
             
             try:
                 # Get user preferences for filtering
@@ -318,28 +424,184 @@ class WalmartShoppingAssistant:
                 
                 logger.info(f"User preferences - Dietary: {dietary_restrictions}, Budget: {budget_limit}")
                 
-                # Perform semantic search using the tool (correct LangChain tool usage)
-                search_params = {
-                    "query": query,
-                    "max_results": Config.MAX_PRODUCTS_TO_RETRIEVE
-                }
-                try:
-                    raw_products = await search_products_semantic.ainvoke(search_params)
-                    log_tool_usage("search_products_semantic", search_params, raw_products)
-                    logger.info(f"Semantic search returned {len(raw_products)} products")
-                except Exception as e:
-                    log_tool_usage("search_products_semantic", search_params, error=str(e))
-                    logger.error(f"Semantic search failed: {e}")
+                # Assess query complexity to avoid over-processing simple requests
+                query_lower = query.lower()
+                simple_indicators = ["i need", "find me", "show me", "buy", "get me"]
+                complex_indicators = ["ingredients for", "make", "recipe", "meal plan", "dinner"]
+
+                is_simple_query = any(indicator in query_lower for indicator in simple_indicators) and not any(complex in query_lower for complex in complex_indicators)
+
+                if is_simple_query and len(query.split()) <= 3:
+                    # Simple product search - don't over-analyze
+                    logger.info("Detected simple query - using direct search approach")
+                    state = self._add_thought(state, "Simple query detected - direct search approach")
+
+                    primary_params = {
+                        "query": query,
+                        "max_results": Config.MAX_PRODUCTS_TO_RETRIEVE
+                    }
+                    try:
+                        primary_products = await search_products_semantic.ainvoke(primary_params)
+                        log_tool_usage("search_products_semantic (simple)", primary_params, primary_products)
+                        logger.info(f"Simple search '{query}' returned {len(primary_products)} products")
+
+                        new_state = dict(state)
+                        new_state["retrieved_products"] = primary_products
+                        new_state["search_strategy"] = "simple_product_search"
+                        new_state["is_dish_request"] = False
+                        new_state["primary_search"] = query
+                        new_state["secondary_searches"] = []
+
+                        # Update conversation context with found products
+                        if new_state.get("conversation_context"):
+                            new_state["conversation_context"].update_products(primary_products, state.get("current_intent", ""))
+                            new_state = self._add_thought(new_state, f"Updated context with {len(primary_products)} products")
+
+                    except Exception as e:
+                        log_tool_usage("search_products_semantic (simple)", primary_params, error=str(e))
+                        logger.error(f"Simple search failed: {e}")
+                        new_state = dict(state)
+                        new_state["retrieved_products"] = []
+
+                else:
+                    # Complex query analysis and decomposition
+                    # STEP 1: Intelligent Query Analysis & Decomposition
+                    query_analysis_prompt = f"""
+                    Analyze this user query for shopping and determine the search strategy:
+                    
+                    Query: "{query}"
+                    User dietary restrictions: {dietary_restrictions}
+                    
+                    Is this a complete dish/meal request that needs multiple ingredients? 
+                    Examples of complete dishes: "chicken salad", "pasta dinner", "breakfast bowl", "sandwich", "stir fry"
+                    
+                    If YES, list the core ingredients needed:
+                    - Primary item (main ingredient)
+                    - Secondary items (supporting ingredients)
+                    - Optional items (extras that would complete the dish)
+                    
+                    If NO, it's a simple product search.
+                    
+                    Respond in this exact format:
+                    DISH_REQUEST: YES or NO
+                    PRIMARY: [main ingredient to search for]
+                    SECONDARY: [ingredient1, ingredient2, ingredient3] (comma separated, max 4 items)
+                    OPTIONAL: [optional1, optional2] (comma separated, max 2 items)
+                    
+                    Example for "chicken salad":
+                    DISH_REQUEST: YES
+                    PRIMARY: canned chicken
+                    SECONDARY: lettuce, mayonnaise, celery, bread
+                    OPTIONAL: tomatoes, onions
+                    """
+
+                    # Use LLM to analyze and decompose the query
+                    analysis_response = await self._make_agentic_decision(query_analysis_prompt)
+
+                    # Parse the response
+                    is_dish_request = False
+                    primary_search = query
+                    secondary_searches = []
+                    optional_searches = []
+
+                    try:
+                        lines = analysis_response.strip().split('\n')
+                        for line in lines:
+                            if line.startswith('DISH_REQUEST:'):
+                                is_dish_request = 'YES' in line.upper()
+                            elif line.startswith('PRIMARY:'):
+                                primary_search = line.split(':', 1)[1].strip()
+                            elif line.startswith('SECONDARY:'):
+                                secondary_items = line.split(':', 1)[1].strip()
+                                if secondary_items and secondary_items != '[]':
+                                    secondary_searches = [item.strip() for item in secondary_items.split(',') if item.strip()]
+                            elif line.startswith('OPTIONAL:'):
+                                optional_items = line.split(':', 1)[1].strip()
+                                if optional_items and optional_items != '[]':
+                                    optional_searches = [item.strip() for item in optional_items.split(',') if item.strip()]
+                    except Exception as parse_error:
+                        logger.warning(f"Failed to parse query analysis, using simple search: {parse_error}")
+                        is_dish_request = False
+
+                    logger.info(f"Query analysis - Dish request: {is_dish_request}, Primary: '{primary_search}', Secondary: {secondary_searches}, Optional: {optional_searches}")
+                    state = self._add_thought(state, f"Query decomposed - Primary: '{primary_search}', {len(secondary_searches)} secondary items")
+
+                    # STEP 2: Execute Comprehensive Search Strategy
+                    all_products = []
+
+                    # Primary search (always performed)
+                    primary_params = {
+                        "query": primary_search,
+                        "max_results": Config.MAX_PRODUCTS_TO_RETRIEVE
+                    }
+                    try:
+                        primary_products = await search_products_semantic.ainvoke(primary_params)
+                        log_tool_usage("search_products_semantic (primary)", primary_params, primary_products)
+                        logger.info(f"Primary search '{primary_search}' returned {len(primary_products)} products")
+                        all_products.extend(primary_products)
+                    except Exception as e:
+                        log_tool_usage("search_products_semantic (primary)", primary_params, error=str(e))
+                        logger.error(f"Primary search failed: {e}")
+
+                    # Secondary searches (for dish requests)
+                    if is_dish_request and secondary_searches:
+                        for secondary_item in secondary_searches:
+                            secondary_params = {
+                                "query": secondary_item,
+                                "max_results": 2  # Limit secondary items to avoid overwhelming
+                            }
+                            try:
+                                secondary_products = await search_products_semantic.ainvoke(secondary_params)
+                                log_tool_usage("search_products_semantic (secondary)", secondary_params, secondary_products)
+                                logger.info(f"Secondary search '{secondary_item}' returned {len(secondary_products)} products")
+                                all_products.extend(secondary_products)
+                            except Exception as e:
+                                log_tool_usage("search_products_semantic (secondary)", secondary_params, error=str(e))
+                                logger.error(f"Secondary search for '{secondary_item}' failed: {e}")
+
+                    # Optional searches (for dish requests, only if we have room)
+                    if is_dish_request and optional_searches and len(all_products) < Config.MAX_PRODUCTS_TO_RETRIEVE:
+                        remaining_slots = Config.MAX_PRODUCTS_TO_RETRIEVE - len(all_products)
+                        for optional_item in optional_searches[:remaining_slots]:
+                            optional_params = {
+                                "query": optional_item,
+                                "max_results": 1  # Just one option for optional items
+                            }
+                            try:
+                                optional_products = await search_products_semantic.ainvoke(optional_params)
+                                log_tool_usage("search_products_semantic (optional)", optional_params, optional_products)
+                                logger.info(f"Optional search '{optional_item}' returned {len(optional_products)} products")
+                                all_products.extend(optional_products)
+                            except Exception as e:
+                                log_tool_usage("search_products_semantic (optional)", optional_params, error=str(e))
+                                logger.error(f"Optional search for '{optional_item}' failed: {e}")
+
+                    # Remove duplicates while preserving order
+                    seen_ids = set()
                     raw_products = []
-                
-                new_state = dict(state)
-                new_state["retrieved_products"] = raw_products
-                new_state = self._add_thought(new_state, f"Found {len(raw_products)} relevant products")
-                
+                    for product in all_products:
+                        product_id = product.get("id")
+                        if product_id and product_id not in seen_ids:
+                            seen_ids.add(product_id)
+                            raw_products.append(product)
+
+                    logger.info(f"Comprehensive search completed: {len(raw_products)} unique products found")
+
+                    new_state = dict(state)
+                    new_state["retrieved_products"] = raw_products
+                    new_state = self._add_thought(new_state, f"Found {len(raw_products)} relevant products from comprehensive search")
+
+                    # Mark the search strategy used for better response generation
+                    new_state["search_strategy"] = "comprehensive_dish_search" if is_dish_request else "simple_product_search"
+                    new_state["is_dish_request"] = is_dish_request
+                    new_state["primary_search"] = primary_search
+                    new_state["secondary_searches"] = secondary_searches
+
+                # STEP 3: Apply Intelligent Filtering
                 # Apply dietary restrictions filtering
-                if dietary_restrictions and raw_products:
+                if dietary_restrictions and new_state["retrieved_products"]:
                     filter_params = {
-                        "products": raw_products, 
+                        "products": new_state["retrieved_products"],
                         "restrictions": dietary_restrictions
                     }
                     try:
@@ -347,7 +609,7 @@ class WalmartShoppingAssistant:
                         log_tool_usage("filter_products_by_dietary_restrictions", filter_params, filtered_products)
                         new_state["retrieved_products"] = filtered_products
                         new_state = self._add_thought(new_state, f"Filtered to {len(filtered_products)} products based on dietary preferences")
-                        logger.info(f"Applied dietary restrictions filter: {len(raw_products)} -> {len(filtered_products)} products")
+                        logger.info(f"Applied dietary restrictions filter: {len(new_state['retrieved_products'])} -> {len(filtered_products)} products")
                     except Exception as e:
                         log_tool_usage("filter_products_by_dietary_restrictions", filter_params, error=str(e))
                         logger.error(f"Dietary filtering failed: {e}")
@@ -373,8 +635,14 @@ class WalmartShoppingAssistant:
                 elif budget_limit:
                     logger.info("No products to filter for budget limit")
                 
+                # Update conversation context with final products
+                if new_state.get("conversation_context"):
+                    new_state["conversation_context"].update_products(new_state["retrieved_products"], state.get("current_intent", ""))
+                    new_state = self._add_thought(new_state, f"Context updated with {len(new_state['retrieved_products'])} final products")
+
                 new_state["reasoning_step"] = "product_discovery"
-                logger.info(f"Product discovery completed. Final result: {len(new_state['retrieved_products'])} products")
+                
+                logger.info(f"Product discovery completed. Final result: {len(new_state['retrieved_products'])} products using {new_state.get('search_strategy', 'unknown')}")
                 return new_state
                 
             except Exception as e:
@@ -382,24 +650,6 @@ class WalmartShoppingAssistant:
                 new_state = dict(state)
                 new_state["retrieved_products"] = []
                 new_state = self._add_thought(new_state, f"Error during product search: {str(e)}")
-                return new_state
-                
-                # Apply budget filtering if specified
-                if budget_limit:
-                    budget_filtered = await filter_products_by_budget.ainvoke({
-                        "products": new_state["retrieved_products"], 
-                        "max_budget": budget_limit
-                    })
-                    new_state["retrieved_products"] = budget_filtered
-                    new_state = self._add_thought(new_state, f"Filtered to {len(budget_filtered)} products within budget")
-                
-                new_state["reasoning_step"] = "product_discovery"
-                return new_state
-                
-            except Exception as e:
-                state = self._add_thought(state, f"Error in product discovery: {str(e)}")
-                new_state = dict(state)
-                new_state["retrieved_products"] = []
                 return new_state
         
         async def execute_actions(state: ShoppingAssistantState) -> ShoppingAssistantState:
@@ -449,19 +699,31 @@ class WalmartShoppingAssistant:
                 
                 # Intent-specific actions with enhanced agentic decision making
                 if intent in ["shopping_list_management"]:
-                    logger.info("Processing shopping list management intent with agentic decision making")
+                    logger.info("Processing shopping list management intent with comprehensive context analysis")
                     
-                    # Format chat history for context awareness
+                    # Enhanced context awareness for shopping list actions
                     chat_history_text = ""
+                    recent_assistant_mentions = []
                     if state.get("chat_history"):
                         history_items = []
-                        for msg in state["chat_history"][-4:]:  # Last 4 messages for context
+                        for msg in state["chat_history"][-6:]:  # Last 6 messages for context
                             role = "User" if msg.get("role") == "user" else "Assistant"
                             content = msg.get("content", "")
                             history_items.append(f"{role}: {content}")
+                            
+                            # Extract items mentioned by assistant in recent messages
+                            if role == "Assistant":
+                                # Look for food items, ingredients, or product mentions
+                                content_lower = content.lower()
+                                food_keywords = ["chicken", "lettuce", "mayonnaise", "bread", "tomato", "celery", "onion", 
+                                               "pasta", "rice", "milk", "eggs", "cheese", "yogurt", "banana", "apple",
+                                               "oatmeal", "spinach", "olive oil", "garlic", "salt", "pepper"]
+                                mentioned_items = [item for item in food_keywords if item in content_lower]
+                                recent_assistant_mentions.extend(mentioned_items)
+                        
                         chat_history_text = "\n".join(history_items)
                     
-                    # Use LLM to determine the specific shopping list action needed with context
+                    # Enhanced LLM decision making with better context understanding
                     shopping_action_prompt = f"""
                     Analyze this user message and recent conversation to determine what shopping list action they want:
                     
@@ -471,24 +733,37 @@ class WalmartShoppingAssistant:
                     Current user message: "{state["current_message"]}"
                     Current shopping list has: {len(new_state["shopping_list"])} items
                     Available products from current search: {len(state.get("retrieved_products", []))} items
+                    Recent food items mentioned by assistant: {recent_assistant_mentions}
                     
-                    Context analysis:
-                    - Did the assistant just provide a meal plan, product recommendations, or ingredient list in the conversation?
-                    - Is the user now asking to add "those items", "these products", "the meal plan", etc. to their cart/list?
-                    - Are they referring to previously mentioned items?
+                    Context analysis guidelines:
+                    - Did the assistant just provide a meal plan, recipe, ingredient list, or product recommendations?
+                    - Is the user now asking to add "those items", "these products", "the meal ingredients", etc.?
+                    - Are they referring to a complete dish mentioned earlier (like "chicken salad")?
+                    - Do they want to add ALL ingredients for a complete dish, not just the main item?
+                    
+                    Key phrases that indicate adding contextual items:
+                    - "add those to my cart/list" 
+                    - "add these items"
+                    - "put those in my list"  
+                    - "I'll take those"
+                    - "add them all"
+                    - "add the ingredients"
+                    - "add everything for the salad/meal"
                     
                     Respond with ONLY one of these actions:
                     - CLEAR_LIST: if they want to empty/clear/reset their shopping list
-                    - ADD_PRODUCTS: if they want to add found products OR previously mentioned items to their list
-                    - ADD_FROM_CONTEXT: if they're referring to items from recent conversation (meal plans, etc.)
-                    - REMOVE_SPECIFIC: if they want to remove specific items (not implemented yet)
+                    - ADD_ALL_CONTEXT: if they want to add ALL items from recent conversation (complete dish ingredients)
+                    - ADD_CURRENT_PRODUCTS: if they want to add currently found/searched products
+                    - ADD_SPECIFIC_ITEMS: if they're mentioning specific items to add
+                    - REMOVE_SPECIFIC: if they want to remove specific items
                     - VIEW_LIST: if they just want to see their current list
                     - NO_ACTION: if no clear shopping list action is needed
                     """
                     
                     shopping_action = await self._make_agentic_decision(shopping_action_prompt)
+                    logger.info(f"Enhanced shopping action decision: {shopping_action}")
                     
-                    # Execute the determined action with robust error handling
+                    # Execute the determined action with comprehensive item handling
                     if shopping_action == "CLEAR_LIST":
                         logger.info("Executing CLEAR_LIST action based on agentic decision")
                         tool_params = {"user_id": user_id}
@@ -507,104 +782,187 @@ class WalmartShoppingAssistant:
                             logger.error(f"Error clearing shopping list: {e}")
                             actions_taken.append("❌ Failed to clear shopping list due to technical error")
                     
-                    elif shopping_action in ["ADD_PRODUCTS", "ADD_FROM_CONTEXT"]:
+                    elif shopping_action in ["ADD_ALL_CONTEXT", "ADD_CURRENT_PRODUCTS", "ADD_SPECIFIC_ITEMS"]:
                         logger.info(f"Executing {shopping_action} action based on agentic decision")
                         
-                        # If user is referring to context and we don't have current products, search for meal plan items
-                        if shopping_action == "ADD_FROM_CONTEXT" and not state.get("retrieved_products"):
-                            logger.info("User referring to items from conversation context - extracting from recent recommendations")
+                        products_to_add = []
+                        
+                        # Determine which products to add based on the action
+                        if shopping_action == "ADD_ALL_CONTEXT":
+                            # Look for items from conversation context and current search results
+                            context_items = recent_assistant_mentions
+                            current_products = new_state.get("retrieved_products", [])
                             
-                            # First, try to extract products from recent recommendations (meal plans, etc.)
-                            context_products = []
-                            for recommendation in new_state.get("recommendations", [])[-3:]:  # Check last 3 recommendations
-                                if recommendation.get("type") == "meal_plan":
-                                    meal_plan = recommendation.get("meal_suggestions", {})
-                                    meal_plan_data = meal_plan.get("meal_plan", {})
-                                    for meal_type, products in meal_plan_data.items():
-                                        if isinstance(products, list):
-                                            context_products.extend(products)
-                                elif recommendation.get("type") in ["ingredient_list", "quick_recipe"]:
-                                    ingredients = recommendation.get("ingredients", [])
-                                    if isinstance(ingredients, list):
-                                        context_products.extend(ingredients)
+                            # If we have current products (from recent search), prioritize those
+                            if current_products:
+                                products_to_add = current_products
+                                logger.info(f"Using {len(current_products)} products from recent search for context addition")
+                            elif context_items:
+                                # Search for mentioned items from conversation
+                                logger.info(f"Searching for {len(context_items)} items mentioned in conversation: {context_items}")
+                                for item in context_items[:6]:  # Limit to prevent overwhelming
+                                    search_params = {"query": item, "max_results": 1}
+                                    try:
+                                        item_products = await search_products_semantic.ainvoke(search_params)
+                                        if item_products and not any(p.get("error") for p in item_products):
+                                            products_to_add.extend(item_products)
+                                    except Exception as e:
+                                        logger.error(f"Failed to search for context item '{item}': {e}")
                             
-                            # If we still don't have products, search based on chat history
-                            if not context_products:
-                                # Extract search terms from recent chat history
-                                search_terms = []
-                                for message in state.get("chat_history", [])[-5:]:  # Check last 5 messages
-                                    if not message.get("is_user", True):  # Assistant messages
-                                        content = message.get("content", "").lower()
-                                        # Look for food/ingredient mentions
-                                        food_terms = ["oatmeal", "breakfast", "lunch", "dinner", "chicken", "pasta", "rice", 
-                                                     "bread", "milk", "eggs", "vegetables", "fruits", "snacks"]
-                                        found_terms = [term for term in food_terms if term in content]
-                                        search_terms.extend(found_terms)
-                                
-                                if search_terms:
-                                    context_search_query = " ".join(search_terms[:5])  # Use top 5 terms
-                                else:
-                                    context_search_query = "healthy meal plan ingredients"
-                                    
-                                search_params = {
-                                    "query": context_search_query,
-                                    "max_results": 8
-                                }
-                                try:
-                                    context_products = await search_products_semantic.ainvoke(search_params)
-                                    log_tool_usage("search_products_semantic (context)", search_params, context_products)
-                                    logger.info(f"Found {len(context_products)} products from context search with query: '{context_search_query}'")
-                                except Exception as e:
-                                    log_tool_usage("search_products_semantic (context)", search_params, error=str(e))
-                                    logger.error(f"Context search failed: {e}")
-                                    context_products = []
-                            
-                            if context_products:
-                                new_state["retrieved_products"] = context_products
-                                actions_taken.append(f"🔍 Found {len(context_products)} items from our conversation")
-                                logger.info(f"Successfully extracted {len(context_products)} products from conversation context")
+                            if products_to_add:
+                                actions_taken.append(f"🔍 Found {len(products_to_add)} items from our conversation context")
                             else:
-                                logger.warning("No products found in conversation context")
+                                actions_taken.append("⚠️ I couldn't find the specific items we discussed. Could you clarify what you'd like to add?")
                         
-                        # Get products to add - either existing retrieved_products or search for specific items
-                        products_to_add = new_state.get("retrieved_products", [])
-                        
-                        # If still no products, try to search for specific items mentioned in the message
-                        if not products_to_add and shopping_action == "ADD_PRODUCTS":
-                            logger.info("No retrieved products found, searching for items mentioned in message")
-                            # Extract item names from the user message
-                            user_message = state["current_message"].lower()
-                            item_keywords = ["greek yogurt", "yogurt", "bananas", "banana", "milk", "bread", "eggs", "chicken", "pasta", "rice"]
-                            mentioned_items = [item for item in item_keywords if item in user_message]
+                        elif shopping_action == "ADD_CURRENT_PRODUCTS":
+                            all_products = new_state.get("retrieved_products", [])
                             
-                            if mentioned_items:
-                                search_query = " ".join(mentioned_items)
-                                search_params = {"query": search_query, "max_results": 5}
-                                try:
-                                    searched_products = await search_products_semantic.ainvoke(search_params)
-                                    log_tool_usage("search_products_semantic (items)", search_params, searched_products)
-                                    products_to_add = searched_products
-                                    new_state["retrieved_products"] = searched_products
-                                    actions_taken.append(f"🔍 Found {len(searched_products)} products matching: {search_query}")
-                                    logger.info(f"Found {len(searched_products)} products for mentioned items: {search_query}")
-                                except Exception as e:
-                                    log_tool_usage("search_products_semantic (items)", search_params, error=str(e))
-                                    logger.error(f"Failed to search for mentioned items: {e}")
+                            if all_products:
+                                # Smart product selection: filter and prioritize the best matches
+                                logger.info(f"Intelligently selecting from {len(all_products)} available products")
+                                
+                                # Sort products by relevance score and filter out poor matches
+                                good_products = []
+                                for product in all_products:
+                                    relevance_score = product.get("relevance_score", 0)
+                                    category = product.get("category", "").lower()
+                                    
+                                    # Skip products with very low relevance scores
+                                    if relevance_score < 0.4:
+                                        logger.info(f"Skipping low-relevance product: {product.get('name')} (score: {relevance_score:.3f})")
+                                        continue
+                                    
+                                    # Skip obviously irrelevant categories for food searches
+                                    if any(bad_cat in category for bad_cat in ['cell phone', 'electronics', 'tools']):
+                                        logger.info(f"Skipping non-food product: {product.get('name')} (category: {category})")
+                                        continue
+                                    
+                                    good_products.append(product)
+                                
+                                # Sort by relevance score (highest first)
+                                good_products.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+                                
+                                # For dish requests, try to get one from each ingredient category
+                                if new_state.get("is_dish_request"):
+                                    logger.info("Dish request detected - selecting diverse ingredients")
+                                    
+                                    # Group products by category to ensure diversity
+                                    category_groups = {}
+                                    for product in good_products:
+                                        category = product.get("category", "Unknown")
+                                        if category not in category_groups:
+                                            category_groups[category] = []
+                                        category_groups[category].append(product)
+                                    
+                                    # Take the best product from each category (max 6 categories)
+                                    products_to_add = []
+                                    for category, products in category_groups.items():
+                                        if len(products_to_add) < 6:  # Reasonable limit for ingredients
+                                            best_product = max(products, key=lambda x: x.get('relevance_score', 0))
+                                            products_to_add.append(best_product)
+                                            logger.info(f"Selected from {category}: {best_product.get('name')} (score: {best_product.get('relevance_score', 0):.3f})")
+                                else:
+                                    # For simple searches, take top 3 most relevant products
+                                    products_to_add = good_products[:3]
+                                
+                                if products_to_add:
+                                    actions_taken.append(f"🛒 Adding {len(products_to_add)} carefully selected products from your search")
+                                    logger.info(f"Selected {len(products_to_add)} products out of {len(all_products)} available")
+                                else:
+                                    actions_taken.append("⚠️ No suitable products found from recent search to add")
+                            else:
+                                actions_taken.append("⚠️ No products found from recent search to add")
                         
-                        # Limit to top 5 products to avoid overwhelming the user
-                        products_to_add = products_to_add[:5] if products_to_add else []
+                        elif shopping_action == "ADD_SPECIFIC_ITEMS":
+                            # CRITICAL FIX: Check conversation context FIRST for recent products
+                            user_message = state["current_message"].lower()
+                            
+                            # Check if user is referring to recent products in context
+                            context_products = []
+                            if new_state.get("conversation_context") and new_state["conversation_context"].has_valid_context():
+                                context_products = new_state["conversation_context"].get_contextual_products()
+                                logger.info(f"Found {len(context_products)} products in conversation context")
+                            
+                            # Check if they're referring to a specific product by name
+                            specific_product_match = None
+                            product_name_phrases = ["asus vivobook", "laptop", "macbook", "dell", "hp"]
+                            
+                            for phrase in product_name_phrases:
+                                if phrase in user_message:
+                                    # Search in context products first
+                                    for product in context_products:
+                                        if phrase.lower() in product.get("name", "").lower():
+                                            specific_product_match = product
+                                            logger.info(f"Found specific product match in context: {product.get('name')}")
+                                            break
+                                    break
+                            
+                            if specific_product_match:
+                                # User is referring to a specific product from recent search
+                                products_to_add = [specific_product_match]
+                                actions_taken.append(f"🎯 Found the specific product you mentioned: {specific_product_match.get('name')}")
+                            elif context_products and any(phrase in user_message for phrase in ["those", "these", "them", "that one"]):
+                                # User is referring to context products with generic terms
+                                products_to_add = context_products[:3]  # Take top 3 from context
+                                actions_taken.append(f"📋 Adding {len(products_to_add)} products from our previous search")
+                            else:
+                                # Extract specific items mentioned in the current message (fallback)
+                                specific_items = []
+                                food_terms = ["chicken", "lettuce", "mayonnaise", "bread", "tomato", "celery", "onion",
+                                            "pasta", "rice", "milk", "eggs", "cheese", "yogurt", "banana", "apple"]
+                                
+                                # Look for food terms in the message
+                                mentioned_foods = [term for term in food_terms if term in user_message]
+                                
+                                # Also check if they mentioned complete dishes
+                                dish_terms = {"salad": ["lettuce", "tomato", "cucumber"], 
+                                            "sandwich": ["bread", "lettuce", "tomato"],
+                                            "pasta": ["pasta", "sauce", "cheese"]}
+                                
+                                for dish, ingredients in dish_terms.items():
+                                    if dish in user_message:
+                                        mentioned_foods.extend(ingredients)
+                                
+                                # Remove duplicates
+                                mentioned_foods = list(set(mentioned_foods))
+                            
+                                # Remove duplicates
+                                mentioned_foods = list(set(mentioned_foods))
+                                
+                                if mentioned_foods:
+                                    logger.info(f"Searching for specific items mentioned: {mentioned_foods}")
+                                    for item in mentioned_foods[:5]:  # Limit to 5 items
+                                        search_params = {"query": item, "max_results": 1}
+                                        try:
+                                            item_products = await search_products_semantic.ainvoke(search_params)
+                                            if item_products and not any(p.get("error") for p in item_products):
+                                                products_to_add.extend(item_products)
+                                        except Exception as e:
+                                            logger.error(f"Failed to search for specific item '{item}': {e}")
+                                    
+                                    actions_taken.append(f"🔍 Found {len(products_to_add)} items matching: {', '.join(mentioned_foods[:3])}")
+                                else:
+                                    actions_taken.append("⚠️ Please specify which items you'd like me to add to your cart")
                         
-                        if not products_to_add:
-                            actions_taken.append("⚠️ I don't see any specific items to add. Could you please specify what products you'd like in your cart?")
-                            logger.info("No products available to add to shopping list")
-                        else:
+                        # Add products to shopping list with better error handling
+                        if products_to_add:
                             added_count = 0
                             failed_count = 0
                             added_items = []
+                            skipped_items = []
+                            
+                            logger.info(f"Attempting to add {len(products_to_add)} selected products to shopping list")
                             
                             for product in products_to_add:
                                 product_id = product.get("id")
                                 product_name = product.get("name", "Unknown item")
+                                category = product.get("category", "Unknown")
+                                
+                                # Additional safety check to avoid obviously wrong products
+                                if any(bad_term in product_name.lower() for bad_term in ['cell phone', 'mobile', 'electronic']):
+                                    skipped_items.append(f"{product_name} (not food)")
+                                    logger.info(f"Skipping non-food item: {product_name}")
+                                    continue
                                 
                                 if product_id:
                                     tool_params = {
@@ -630,13 +988,26 @@ class WalmartShoppingAssistant:
                                     failed_count += 1
                                     logger.warning(f"Product {product_name} has no ID - cannot add to shopping list")
                             
+                            # Provide comprehensive feedback
                             if added_count > 0:
-                                items_summary = ", ".join(added_items[:3])
+                                items_summary = ", ".join(added_items[:3])  # Show first 3 items
                                 if len(added_items) > 3:
-                                    items_summary += f" and {len(added_items) - 3} more items"
+                                    items_summary += f" and {len(added_items) - 3} more"
                                 actions_taken.append(f"✅ Added {added_count} items to your cart: {items_summary}")
+                                
+                                # If this was a dish request, mention completeness
+                                if new_state.get("is_dish_request"):
+                                    dish_name = new_state.get("primary_search", "dish")
+                                    actions_taken.append(f"🍽️ Your {dish_name} ingredients are ready!")
+                            
                             if failed_count > 0:
-                                actions_taken.append(f"⚠️ {failed_count} products could not be added")
+                                actions_taken.append(f"⚠️ {failed_count} products could not be added (backend issue)")
+                            
+                            if skipped_items:
+                                actions_taken.append(f"⏭️ Skipped {len(skipped_items)} irrelevant items")
+                                
+                        else:
+                            actions_taken.append("⚠️ No suitable items found to add. Please be more specific about what you'd like.")
                     
                     elif shopping_action == "VIEW_LIST":
                         actions_taken.append(f"📋 Your shopping list contains {len(new_state['shopping_list'])} items")
@@ -648,7 +1019,7 @@ class WalmartShoppingAssistant:
                     
                     else:  # NO_ACTION, FALLBACK, or unknown
                         logger.info(f"No specific shopping list action needed for decision: {shopping_action}")
-                        actions_taken.append("📝 Reviewed your shopping list preferences")
+                        actions_taken.append("📝 I'm ready to help with your shopping list")
                 
                 elif intent in ["budget_analysis"]:
                     logger.info("Processing budget analysis intent with agentic decision making")
@@ -1160,6 +1531,10 @@ class WalmartShoppingAssistant:
                     "chat_history": chat_history_text,
                     "current_message": state.get("current_message", ""),
                     "current_intent": state.get("current_intent", ""),
+                    "search_strategy": state.get("search_strategy", "simple_search"),
+                    "is_dish_request": state.get("is_dish_request", False),
+                    "primary_search": state.get("primary_search", ""),
+                    "secondary_searches": json.dumps(state.get("secondary_searches", [])),
                     "retrieved_products": json.dumps(state.get("retrieved_products", [])[:3]),
                     "shopping_list": json.dumps(state.get("shopping_list", [])),
                     "agent_thoughts": "\n".join(state.get("agent_thoughts", [])),
@@ -1235,7 +1610,8 @@ class WalmartShoppingAssistant:
     async def chat(self, user_message: str, user_id: str = "default_user", 
                    user_profile: Optional[Dict] = None, 
                    chat_history: Optional[List[Dict]] = None,
-                   recent_products: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                   recent_products: Optional[List[Dict]] = None,
+                   conversation_context: Optional[ConversationState] = None) -> Dict[str, Any]:
         """
         Main chat interface for the shopping assistant.
         
@@ -1244,6 +1620,8 @@ class WalmartShoppingAssistant:
             user_id: Unique identifier for the user
             user_profile: User's profile and preferences
             chat_history: Previous conversation history
+            recent_products: Products from recent searches
+            conversation_context: CRITICAL - Persistent conversation context for "add those" functionality
             
         Returns:
             Dictionary containing the response and agent thoughts
@@ -1254,6 +1632,13 @@ class WalmartShoppingAssistant:
         logger.info(f"Message: {user_message}")
         logger.info(f"Chat history length: {len(chat_history) if chat_history else 0}")
         logger.info(f"User profile provided: {bool(user_profile)}")
+        
+        # CRITICAL FIX: Reuse existing conversation context or create new one
+        if conversation_context is None:
+            conversation_context = ConversationState()
+            logger.info("Created new conversation context")
+        else:
+            logger.info(f"Reusing conversation context with {len(conversation_context.last_products)} products")
         
         # Initialize state with conversation history and recent products
         initial_state = ShoppingAssistantState(
@@ -1270,7 +1655,8 @@ class WalmartShoppingAssistant:
             recommendations=[],
             actions_taken=[],
             api_responses=[],
-            final_response=""
+            final_response="",
+            conversation_context=conversation_context  # FIXED: Use persistent context
         )
         
         print(f"\n🛒 Walmart Shopping Assistant")
@@ -1302,6 +1688,7 @@ class WalmartShoppingAssistant:
                     {"role": "user", "content": user_message},
                     {"role": "assistant", "content": final_state["final_response"]}
                 ],
+                "conversation_context": final_state.get("conversation_context"),  # CRITICAL: Return context
                 "success": True
             }
             
@@ -1319,7 +1706,7 @@ class WalmartShoppingAssistant:
                 "response": error_msg,
                 "products": [],
                 "recommendations": [],
-                "actions_taken": ["Error occurred during processing"],
+ "actions_taken": ["Error occurred during processing"],
                 "agent_thoughts": ["Error occurred during processing"],
                 "intent": "error",
                 "success": False

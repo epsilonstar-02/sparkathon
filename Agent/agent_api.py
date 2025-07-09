@@ -34,7 +34,12 @@ shopping_assistant = WalmartShoppingAssistant()
 
 # In-memory session storage for chat history and context
 # In production, you'd want to use Redis or a database
-session_storage = defaultdict(lambda: {"chat_history": [], "recent_products": [], "last_search_context": ""})
+session_storage = defaultdict(lambda: {
+    "chat_history": [], 
+    "recent_products": [], 
+    "last_search_context": "",
+    "conversation_context": None  # CRITICAL: Store conversation context
+})
 
 # Request/Response models
 class ChatRequest(BaseModel):
@@ -97,19 +102,22 @@ async def chat_with_assistant(request: ChatRequest):
         session_data = session_storage[session_key]
         chat_history = request.chat_history or session_data["chat_history"]
         recent_products = session_data["recent_products"]
+        conversation_context = session_data["conversation_context"]  # CRITICAL: Get persistent context
         
-        # Call the agent with chat history and recent products
+        # Call the agent with chat history, recent products, AND conversation context
         result = await shopping_assistant.chat(
             user_message=request.message,
             user_id=request.user_id,
             user_profile=request.user_profile,
             chat_history=chat_history,
-            recent_products=recent_products  # Pass recent products from session
+            recent_products=recent_products,  # Pass recent products from session
+            conversation_context=conversation_context  # CRITICAL: Pass persistent context
         )
         
         # Update session storage with new data
         if result.get("success", False):
             session_data["chat_history"] = result.get("chat_history", [])
+            session_data["conversation_context"] = result.get("conversation_context")  # CRITICAL: Save context
             
             # Store recent products for future use
             current_products = result.get("products", [])

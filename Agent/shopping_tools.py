@@ -37,6 +37,15 @@ def log_tool_call(tool_name: str, params: Dict[str, Any], result: Any = None, er
             else:
                 tool_logger.info(f"🔧 {tool_name} RESULT: {type(result).__name__}")
 
+# User session locks for sequential operations
+_user_locks = {}
+
+def get_user_lock(user_id: str):
+    """Get or create a lock for a specific user to ensure sequential operations."""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
 # Circuit Breaker implementation
 class CircuitBreaker:
     """Circuit breaker pattern to prevent cascading failures."""
@@ -347,7 +356,7 @@ def initialize_tools(product_searcher_instance):
 @tool
 async def search_products_semantic(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
-    Search for products using semantic similarity.
+    Search for products using semantic similarity with intelligent filtering.
     Use this when users ask for products, ingredients, or items.
     
     Args:
@@ -366,7 +375,8 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
             log_tool_call("search_products_semantic", params, error=error)
             return [{"error": error}]
         
-        results = _product_searcher.search(query, n_results=max_results, min_similarity=0.1)
+        # Use a more restrictive similarity threshold for better results
+        results = _product_searcher.search(query, n_results=max_results * 2, min_similarity=0.1)
         
         formatted_products = []
         for product in results.get("results", []):
@@ -392,22 +402,120 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
                 # For L2: use inverse relationship: similarity = 1 / (1 + distance)
                 similarity_score = 1 / (1 + distance) if distance >= 0 else 0
             
+            # Smart filtering based on query relevance and product categories
+            category = metadata.get("category", "").lower()
+            query_lower = query.lower()
+            product_name_lower = product.get("document", "").lower()
+            
+            # Define relevance rules for common food searches
+            is_relevant = True
+            relevance_score = similarity_score
+            
+            # Universal filtering for clearly wrong products in food searches
+            if any(food_hint in query_lower for food_hint in ['chicken', 'lettuce', 'mayonnaise', 'bread', 'celery', 'salad', 'meal', 'ingredient']):
+                # This is clearly a food-related search
+                if any(bad_category in category for bad_category in ['cell phone', 'electronics', 'phone', 'mobile', 'technology', 'tools']):
+                    tool_logger.info(f"Filtering out non-food item for food search: {product.get('document', '')} (category: {category})")
+                    is_relevant = False
+                elif any(bad_word in product_name_lower for bad_word in ['cell phone', 'mobile', 'phone', 'electronic', 'tool']):
+                    tool_logger.info(f"Filtering out non-food item by name: {product.get('document', '')}")
+                    is_relevant = False
+                elif distance > 1.6:  # Very poor matches for food items
+                    tool_logger.info(f"Filtering out poor match for food search: {product.get('document', '')} (distance: {distance:.3f})")
+                    is_relevant = False
+            
+            # Special handling for food-related queries
+            if any(food_term in query_lower for food_term in ['chicken', 'meat', 'protein']):
+                # For meat searches, prioritize meat and poultry categories
+                if any(cat in category for cat in ['meat', 'poultry', 'protein']):
+                    relevance_score *= 1.5  # Boost relevant categories
+                elif 'cell phone' in category or 'electronics' in category:
+                    is_relevant = False  # Filter out electronics for food searches
+            
+            elif any(veg_term in query_lower for veg_term in ['lettuce', 'celery', 'vegetables', 'fresh']):
+                # For vegetable searches, prioritize vegetable categories
+                if any(cat in category for cat in ['vegetable', 'produce', 'fresh']):
+                    relevance_score *= 1.5
+                elif distance > 1.3:  # Filter out poor matches for vegetables
+                    is_relevant = False
+            
+            elif any(condiment in query_lower for condiment in ['mayonnaise', 'mayo', 'sauce', 'condiment']):
+                # For condiment searches, prioritize sauce and spread categories
+                if any(cat in category for cat in ['sauce', 'spread', 'condiment', 'marinade']):
+                    relevance_score *= 1.2
+                elif distance > 1.4:  # Filter out poor matches for condiments
+                    is_relevant = False
+            
+            elif any(bread_term in query_lower for bread_term in ['bread', 'bakery', 'baked']):
+                # For bread searches, prioritize bakery categories
+                if any(cat in category for cat in ['bread', 'bakery', 'baked']):
+                    relevance_score *= 1.5
+                elif distance > 1.4:  # Filter out poor matches for bread
+                    is_relevant = False
+            
+            # General distance-based filtering
+            if distance > 1.5:  # Very poor matches
+                is_relevant = False
+            
+            # Skip irrelevant products
+            if not is_relevant:
+                continue
+            
+            # Extract product name from document
+            document = product.get("document", "")
+            if "|" in document:
+                # Format: "Product: Name | Brand: Brand | Category: Category"
+                product_name_part = document.split("|")[0].replace("Product: ", "").strip()
+                brand = metadata.get("brand", "Unknown")
+                full_name = f"{brand} {product_name_part}" if brand != "Unknown" else product_name_part
+            else:
+                full_name = f"{metadata.get('brand', 'Unknown')} {document}"
+            
             formatted_products.append({
                 "id": metadata.get("product_id"),  # Use PostgreSQL ID from metadata, not ChromaDB ID
                 "chroma_id": product.get("id"),   # Keep ChromaDB ID for reference if needed
-                "name": metadata.get("brand", "Unknown") + " " + product.get("document", "").split("|")[0].replace("Product: ", ""),
+                "name": full_name,
                 "category": metadata.get("category"),
-                "price": metadata.get("price"),
+                "price": metadata.get("price"),  # This should work now
                 "currency": metadata.get("currency", "USD"),
                 "rating": metadata.get("rating"),
                 "availability": metadata.get("availability"),
                 "similarity_score": similarity_score,
+                "relevance_score": relevance_score,
                 "distance": distance,
                 "distance_metric": distance_metric
             })
         
+        # Sort by relevance score and limit results
+        formatted_products.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+        formatted_products = formatted_products[:max_results]
+        
+        # If no good results found, provide helpful feedback
+        if not formatted_products:
+            # Try alternative search terms for common ingredients
+            alternative_suggestions = {
+                'lettuce': ['salad', 'greens', 'vegetables'],
+                'mayonnaise': ['sauce', 'spread', 'condiment'],
+                'bread': ['bakery', 'sandwich', 'grain'],
+                'celery': ['vegetables', 'fresh produce', 'canned vegetables'],
+                'fresh': ['canned', 'frozen', 'packaged']
+            }
+            
+            suggested_terms = []
+            for alt_key, alternatives in alternative_suggestions.items():
+                if alt_key in query.lower():
+                    suggested_terms.extend(alternatives)
+            
+            if suggested_terms:
+                tool_logger.warning(f"🔍 No good matches for '{query}'. Database mainly contains canned/packaged items.")
+                return [{
+                    "error": f"No good matches found for '{query}'",
+                    "suggestion": f"Try searching for: {', '.join(suggested_terms[:3])}",
+                    "note": "This database mainly contains canned, jarred, and packaged food items"
+                }]
+        
         log_tool_call("search_products_semantic", params, formatted_products)
-        tool_logger.info(f"🔍 Search completed: found {len(formatted_products)} products")
+        tool_logger.info(f"🔍 Search completed: found {len(formatted_products)} relevant products")
         return formatted_products
         
     except Exception as e:
@@ -495,7 +603,10 @@ async def add_product_to_list(user_id: str, product_id: str, quantity: int = 1) 
     api_logger.info(f"➕ Adding product {product_id} (qty: {quantity}) to shopping list for user: {user_id}")
     
     try:
-        result = await api_client.add_to_shopping_list(user_id, product_id, quantity)
+        # Get the user lock for sequential operation
+        async with get_user_lock(user_id):
+            result = await api_client.add_to_shopping_list(user_id, product_id, quantity)
+
         log_tool_call("add_product_to_list", params, result)
         
         if result.get("success"):
@@ -527,7 +638,10 @@ async def remove_product_from_list(user_id: str, item_id: str) -> Dict[str, Any]
     api_logger.info(f"➖ Removing item {item_id} from shopping list for user: {user_id}")
     
     try:
-        result = await api_client.remove_from_shopping_list(user_id, item_id)
+        # Get the user lock for sequential operation
+        async with get_user_lock(user_id):
+            result = await api_client.remove_from_shopping_list(user_id, item_id)
+
         log_tool_call("remove_product_from_list", params, result)
         
         if result.get("success"):
@@ -558,7 +672,10 @@ async def clear_shopping_list(user_id: str) -> Dict[str, Any]:
     api_logger.info(f"🧹 Clearing shopping list for user: {user_id}")
     
     try:
-        result = await api_client.clear_shopping_list(user_id)
+        # Get the user lock for sequential operation
+        async with get_user_lock(user_id):
+            result = await api_client.clear_shopping_list(user_id)
+
         log_tool_call("clear_shopping_list", params, result)
         
         if result.get("success"):
