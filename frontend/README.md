@@ -1,4 +1,4 @@
-# Frontend
+# Walmart AI Shopping Assistant Frontend
 
 A modern, interactive React application that provides an AI-powered shopping experience for Walmart customers. This application features a conversational AI interface, interactive store maps, and comprehensive shopping analytics.
 
