@@ -16,7 +16,7 @@ class Config:
     DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
     
     # Backend API Configuration
-    BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000")
+    BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://backend-sparkthon-1.onrender.com")
     
     # ChromaDB Configuration
     CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")

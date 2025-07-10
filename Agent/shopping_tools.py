@@ -26,16 +26,16 @@ def log_tool_call(tool_name: str, params: Dict[str, Any], result: Any = None, er
         tool_logger.info(f"🔧 {tool_name} called with params: {params}")
         if isinstance(result, dict):
             if result:
-                tool_logger.info(f"🔧 {tool_name} RESULT: {list(result.keys())}")
+                tool_logger.info(f"🔧 {tool_name} RESULT: dict with keys {list(result.keys())}")
             else:
-                tool_logger.info(f"🔧 {tool_name} RESULT: {type(result).__name__}")
+                tool_logger.info(f"🔧 {tool_name} RESULT: empty dict")
         elif isinstance(result, list):
             tool_logger.info(f"🔧 {tool_name} RESULT: {len(result)} items")
         else:
             if result:
-                tool_logger.info(f"🔧 {tool_name} RESULT: {list(result.keys())}")
-            else:
                 tool_logger.info(f"🔧 {tool_name} RESULT: {type(result).__name__}")
+            else:
+                tool_logger.info(f"🔧 {tool_name} RESULT: None")
 
 # User session locks for sequential operations
 _user_locks = {}
@@ -371,9 +371,10 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
     
     try:
         if not _product_searcher:
-            error = "Product searcher not initialized"
+            error = "Product searcher not initialized. Please run sync_products.py first."
             log_tool_call("search_products_semantic", params, error=error)
-            return [{"error": error}]
+            tool_logger.error(f"🔍 Critical error: {error}")
+            return [{"error": error, "suggestion": "Run sync_products.py to initialize the product database"}]
         
         # Use a more restrictive similarity threshold for better results
         results = _product_searcher.search(query, n_results=max_results * 2, min_similarity=0.1)
@@ -407,55 +408,41 @@ async def search_products_semantic(query: str, max_results: int = 5) -> List[Dic
             query_lower = query.lower()
             product_name_lower = product.get("document", "").lower()
             
-            # Define relevance rules for common food searches
+            # Intelligent relevance assessment based on distance and context
             is_relevant = True
             relevance_score = similarity_score
             
-            # Universal filtering for clearly wrong products in food searches
-            if any(food_hint in query_lower for food_hint in ['chicken', 'lettuce', 'mayonnaise', 'bread', 'celery', 'salad', 'meal', 'ingredient']):
-                # This is clearly a food-related search
-                if any(bad_category in category for bad_category in ['cell phone', 'electronics', 'phone', 'mobile', 'technology', 'tools']):
-                    tool_logger.info(f"Filtering out non-food item for food search: {product.get('document', '')} (category: {category})")
-                    is_relevant = False
-                elif any(bad_word in product_name_lower for bad_word in ['cell phone', 'mobile', 'phone', 'electronic', 'tool']):
-                    tool_logger.info(f"Filtering out non-food item by name: {product.get('document', '')}")
-                    is_relevant = False
-                elif distance > 1.6:  # Very poor matches for food items
-                    tool_logger.info(f"Filtering out poor match for food search: {product.get('document', '')} (distance: {distance:.3f})")
-                    is_relevant = False
-            
-            # Special handling for food-related queries
-            if any(food_term in query_lower for food_term in ['chicken', 'meat', 'protein']):
-                # For meat searches, prioritize meat and poultry categories
-                if any(cat in category for cat in ['meat', 'poultry', 'protein']):
-                    relevance_score *= 1.5  # Boost relevant categories
-                elif 'cell phone' in category or 'electronics' in category:
-                    is_relevant = False  # Filter out electronics for food searches
-            
-            elif any(veg_term in query_lower for veg_term in ['lettuce', 'celery', 'vegetables', 'fresh']):
-                # For vegetable searches, prioritize vegetable categories
-                if any(cat in category for cat in ['vegetable', 'produce', 'fresh']):
-                    relevance_score *= 1.5
-                elif distance > 1.3:  # Filter out poor matches for vegetables
-                    is_relevant = False
-            
-            elif any(condiment in query_lower for condiment in ['mayonnaise', 'mayo', 'sauce', 'condiment']):
-                # For condiment searches, prioritize sauce and spread categories
-                if any(cat in category for cat in ['sauce', 'spread', 'condiment', 'marinade']):
-                    relevance_score *= 1.2
-                elif distance > 1.4:  # Filter out poor matches for condiments
-                    is_relevant = False
-            
-            elif any(bread_term in query_lower for bread_term in ['bread', 'bakery', 'baked']):
-                # For bread searches, prioritize bakery categories
-                if any(cat in category for cat in ['bread', 'bakery', 'baked']):
-                    relevance_score *= 1.5
-                elif distance > 1.4:  # Filter out poor matches for bread
-                    is_relevant = False
-            
-            # General distance-based filtering
-            if distance > 1.5:  # Very poor matches
+            # Adaptive filtering based on distance thresholds
+            # Better matches have lower distances, so higher thresholds = more permissive
+            if distance > 1.8:  # Very poor matches across all searches
                 is_relevant = False
+                tool_logger.info(f"Filtering out very poor match: {product.get('document', '')} (distance: {distance:.3f})")
+            elif distance > 1.5:  # Moderate filtering for average matches
+                # Use product name and category context to decide
+                product_context = f"{product_name_lower} {category}".lower()
+                
+                # Check if this could be completely irrelevant (e.g., electronics for food search)
+                electronic_indicators = ['cell phone', 'mobile', 'electronic', 'phone', 'technology', 'tool', 'gadget']
+                food_indicators = ['food', 'ingredient', 'meal', 'recipe', 'cook', 'eat', 'drink', 'nutrition']
+                
+                query_context = query_lower
+                is_food_query = any(indicator in query_context for indicator in food_indicators)
+                is_electronic_product = any(indicator in product_context for indicator in electronic_indicators)
+                
+                # If it's clearly a food query and this is clearly electronics, filter it out
+                if is_food_query and is_electronic_product:
+                    is_relevant = False
+                    tool_logger.info(f"Filtering out irrelevant category match: {product.get('document', '')} (food query vs electronics)")
+            
+            # Smart relevance scoring based on category alignment
+            # Boost scores for good category matches while avoiding hardcoded lists
+            category_boost = 1.0
+            if distance < 1.0:  # Very good semantic matches
+                category_boost = 1.3  # Significant boost for excellent matches
+            elif distance < 1.2:  # Good matches
+                category_boost = 1.1  # Modest boost for good matches
+            
+            relevance_score *= category_boost
             
             # Skip irrelevant products
             if not is_relevant:
@@ -748,22 +735,48 @@ async def filter_products_by_dietary_restrictions(products: List[Dict[str, Any]]
         for restriction in restrictions:
             restriction = restriction.lower()
             
-            # Common restriction patterns
-            if restriction in ["vegetarian", "vegan"]:
-                if any(meat_term in product_name or meat_term in product_category 
-                      for meat_term in ["meat", "chicken", "beef", "pork", "fish", "bacon"]):
+            # Smart dietary restriction filtering using flexible pattern matching
+            product_text = f"{product_name} {product_category}".lower()
+            
+            # Vegetarian/Vegan restrictions - look for meat-related terms
+            if any(term in restriction for term in ["vegetarian", "vegan"]):
+                meat_indicators = ["meat", "chicken", "beef", "pork", "fish", "bacon", "turkey", "lamb", "sausage", "ham"]
+                if any(meat_term in product_text for meat_term in meat_indicators):
                     exclude_product = True
                     break
             
-            elif restriction in ["gluten-free", "no gluten"]:
-                if any(gluten_term in product_name 
-                      for gluten_term in ["wheat", "bread", "pasta", "cereal"]):
+            # Gluten-free restrictions - look for gluten-containing terms
+            elif any(term in restriction for term in ["gluten-free", "no gluten", "gluten free"]):
+                gluten_indicators = ["wheat", "bread", "pasta", "cereal", "flour", "barley", "rye", "oats"]
+                if any(gluten_term in product_text for gluten_term in gluten_indicators):
                     exclude_product = True
                     break
             
-            elif restriction in ["no nuts", "nut-free"]:
-                if any(nut_term in product_name 
-                      for nut_term in ["nuts", "almond", "peanut", "walnut"]):
+            # Nut-free restrictions - look for nut-related terms
+            elif any(term in restriction for term in ["no nuts", "nut-free", "nut free", "no nut"]):
+                nut_indicators = ["nuts", "almond", "peanut", "walnut", "cashew", "pistachio", "hazelnut", "pecan"]
+                if any(nut_term in product_text for nut_term in nut_indicators):
+                    exclude_product = True
+                    break
+            
+            # Dairy-free restrictions - look for dairy-related terms
+            elif any(term in restriction for term in ["dairy-free", "no dairy", "dairy free", "lactose-free"]):
+                dairy_indicators = ["milk", "cheese", "butter", "cream", "yogurt", "dairy", "lactose"]
+                if any(dairy_term in product_text for dairy_term in dairy_indicators):
+                    exclude_product = True
+                    break
+            
+            # Sugar-free restrictions - look for sugar-related terms
+            elif any(term in restriction for term in ["sugar-free", "no sugar", "sugar free", "low sugar"]):
+                sugar_indicators = ["sugar", "sweetened", "syrup", "honey", "candy", "chocolate"]
+                if any(sugar_term in product_text for sugar_term in sugar_indicators):
+                    exclude_product = True
+                    break
+            
+            # Low-sodium restrictions - look for high-sodium terms
+            elif any(term in restriction for term in ["low sodium", "no salt", "salt-free"]):
+                sodium_indicators = ["salted", "salt", "sodium", "salty", "pickle", "cured"]
+                if any(sodium_term in product_text for sodium_term in sodium_indicators):
                     exclude_product = True
                     break
         
@@ -884,42 +897,97 @@ async def analyze_nutrition_balance(shopping_list: List[Dict[str, Any]]) -> Dict
             "other": []
         }
         
+        # Enhanced nutrition categorization with flexible pattern matching
         for item in shopping_list:
             category = item.get("category", "").lower()
             name = item.get("name", "").lower()
+            item_text = f"{name} {category}"
             
-            if any(protein_term in name or protein_term in category 
-                  for protein_term in ["meat", "chicken", "fish", "beans", "eggs"]):
+            # Protein sources - comprehensive detection
+            protein_indicators = ["meat", "chicken", "fish", "beans", "eggs", "protein", "beef", "pork", "turkey", 
+                                "tofu", "quinoa", "lentils", "nuts", "seed", "salmon", "tuna"]
+            if any(protein_term in item_text for protein_term in protein_indicators):
                 nutrition_categories["protein"].append(item)
-            elif any(carb_term in name or carb_term in category 
-                    for carb_term in ["bread", "pasta", "rice", "cereal"]):
+            
+            # Carbohydrates - comprehensive detection
+            elif any(carb_term in item_text for carb_term in ["bread", "pasta", "rice", "cereal", "grain", 
+                                                             "oats", "wheat", "corn", "potato", "sweet potato"]):
                 nutrition_categories["carbs"].append(item)
-            elif "dairy" in category or any(dairy_term in name 
-                                          for dairy_term in ["milk", "cheese", "yogurt"]):
+            
+            # Dairy products - comprehensive detection
+            elif any(dairy_term in item_text for dairy_term in ["dairy", "milk", "cheese", "yogurt", 
+                                                               "cream", "butter", "ice cream"]):
                 nutrition_categories["dairy"].append(item)
-            elif any(produce_term in category 
-                    for produce_term in ["produce", "fruit", "vegetable"]):
+            
+            # Fruits and vegetables - comprehensive detection
+            elif any(produce_term in item_text for produce_term in ["produce", "fruit", "vegetable", "fresh", 
+                                                                   "apple", "banana", "orange", "berry", "lettuce", 
+                                                                   "spinach", "carrot", "tomato", "broccoli"]):
                 nutrition_categories["fruits_vegetables"].append(item)
-            elif "snack" in category:
+            
+            # Snacks and processed foods
+            elif any(snack_term in item_text for snack_term in ["snack", "chip", "cookie", "candy", "soda", 
+                                                               "processed", "packaged"]):
                 nutrition_categories["snacks"].append(item)
+            
+            # Everything else
             else:
                 nutrition_categories["other"].append(item)
         
-        # Analyze balance
+        # Smart nutrition analysis with adaptive suggestions
         suggestions = []
-        if len(nutrition_categories["protein"]) < 2:
-            suggestions.append("Consider adding more protein sources")
-        if len(nutrition_categories["fruits_vegetables"]) < 3:
-            suggestions.append("Add more fruits and vegetables for balanced nutrition")
-        if len(nutrition_categories["dairy"]) == 0:
-            suggestions.append("Consider adding dairy products for calcium")
+        total_items = len(shopping_list)
+        
+        # Dynamic thresholds based on shopping list size
+        if total_items > 0:
+            protein_ratio = len(nutrition_categories["protein"]) / total_items
+            produce_ratio = len(nutrition_categories["fruits_vegetables"]) / total_items
+            dairy_ratio = len(nutrition_categories["dairy"]) / total_items
+            snack_ratio = len(nutrition_categories["snacks"]) / total_items
+            
+            # Adaptive suggestions based on ratios, not hardcoded counts
+            if protein_ratio < 0.15:  # Less than 15% protein
+                suggestions.append("Consider adding more protein sources for balanced nutrition")
+            if produce_ratio < 0.25:  # Less than 25% fruits/vegetables
+                suggestions.append("Add more fruits and vegetables for essential vitamins and fiber")
+            if dairy_ratio == 0 and total_items > 5:  # No dairy in larger lists
+                suggestions.append("Consider adding dairy products for calcium and vitamin D")
+            if snack_ratio > 0.4:  # More than 40% snacks
+                suggestions.append("Try to balance snacks with more whole food options")
+            
+            # Positive reinforcement for good choices
+            if produce_ratio >= 0.4:
+                suggestions.append("Great job including plenty of fruits and vegetables!")
+            if protein_ratio >= 0.2:
+                suggestions.append("Excellent protein variety in your list!")
+        
+        # Calculate more sophisticated balance score
+        category_diversity = len([cat for cat in nutrition_categories.values() if cat])
+        balance_score = min(category_diversity / 5.0, 1.0)  # 5 main categories
+        
+        # Adjust score based on ratios
+        if total_items > 0:
+            # Penalize extreme imbalances
+            if snack_ratio > 0.5:
+                balance_score *= 0.8
+            if produce_ratio < 0.1:
+                balance_score *= 0.9
+            # Reward good balance
+            if 0.15 <= protein_ratio <= 0.3 and produce_ratio >= 0.25:
+                balance_score = min(balance_score * 1.1, 1.0)
         
         return {
             "nutrition_breakdown": {k: len(v) for k, v in nutrition_categories.items()},
-            "total_items": len(shopping_list),
-            "balance_score": min(len([cat for cat in nutrition_categories.values() if cat]) / 5.0, 1.0),
+            "total_items": total_items,
+            "balance_score": balance_score,
             "suggestions": suggestions,
-            "categories": nutrition_categories
+            "categories": nutrition_categories,
+            "nutrition_ratios": {
+                "protein_ratio": protein_ratio if total_items > 0 else 0,
+                "produce_ratio": produce_ratio if total_items > 0 else 0,
+                "dairy_ratio": dairy_ratio if total_items > 0 else 0,
+                "snack_ratio": snack_ratio if total_items > 0 else 0
+            }
         }
         
     except Exception as e:
