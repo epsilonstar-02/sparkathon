@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: walmart-fastapi-backend
+    env: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      prisma generate
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: DATABASE_URL
+        sync: false  # set manually on Render dashboard

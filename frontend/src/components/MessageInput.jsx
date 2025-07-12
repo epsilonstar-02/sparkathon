@@ -1,3 +1,5 @@
+
+
 export function MessageInput({ value, onChange, onSend }) {
   return (
     <form
@@ -13,6 +15,7 @@ export function MessageInput({ value, onChange, onSend }) {
         placeholder="Type your message..."
         value={value}
         onChange={onChange}
+        
       />
       <button
         type="submit"
