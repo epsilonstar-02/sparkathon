@@ -1,9 +1,16 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends,UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import os
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
+
+# OpenAI Whisper (ensure it's installed: pip install openai-whisper)
+from gtts import gTTS  # Google TTS (pip install gTTS)
+from fastapi.responses import FileResponse, JSONResponse
+import tempfile
+import whisper
+import httpx
 
 
 from .database import get_db, disconnect_prisma
@@ -16,35 +23,18 @@ from .schemas import (
     SpendingAnalytics, StatusResponse
 )
 
+
+# Check if FFmpeg is installed
+# import subprocess
+# try:
+#     subprocess.run(["ffmpeg", "-version"], check=True)
+#     print("FFmpeg is installed and working!")
+# except Exception as e:
+#     print("FFmpeg not found:", e)
+
 # Load environment variables
 load_dotenv()
 
-# Create FastAPI app
-app = FastAPI(
-    title="Walmart AI Shopping Assistant API",
-    description="Backend API for personalized AI shopping assistant",
-    version="1.0.0"
-)
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # Frontend URLs
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Startup and shutdown events
-# @app.on_event("startup")
-# async def startup():
-#     """Initialize database connection on startup."""
-#     await get_db()
-
-# @app.on_event("shutdown")
-# async def shutdown():
-#     """Close database connection on shutdown."""
-#     await disconnect_prisma()
 
 #new added 
 @asynccontextmanager
@@ -55,7 +45,33 @@ async def lifespan(app: FastAPI):
     # Runs on shutdown
     await disconnect_prisma()
 
-app = FastAPI(lifespan=lifespan)
+
+# Create FastAPI app
+app = FastAPI(
+    title="Walmart AI Shopping Assistant API",
+    description="Backend API for personalized AI shopping assistant",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8001", "http://localhost:5173"],  # Frontend URLs
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+
+# Add this middleware to force CORS headers
+@app.middleware("http")
+async def add_cors_header(request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "http://localhost:5173"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
 
 
 # Health check
@@ -64,10 +80,28 @@ async def health_check():
     return {"status": "healthy", "message": "Walmart AI Shopping Assistant API is running"}
 
 # Product endpoints
+# @app.get("/api/products", response_model=List[Product])
+# async def get_products(skip: int = 0, limit: int = 100,db=Depends(get_db)):
+#     """Get all products."""
+#     products = await db.product.find_many(order={"createdAt": "desc"},skip=skip,
+#         take=min(limit, 500))
+#     return products
 @app.get("/api/products", response_model=List[Product])
-async def get_products(db=Depends(get_db)):
-    """Get all products."""
-    products = await db.product.find_many(order={"createdAt": "desc"})
+async def get_products(ids: str = None, skip: int = 0, limit: int = 100, db=Depends(get_db)):
+    """Get products with optional filtering by IDs"""
+    if ids:
+        id_list = ids.split(',')
+        products = await db.product.find_many(
+            where={"id": {"in": id_list}},
+            skip=skip,
+            take=min(limit, 500)
+        )
+    else:
+        products = await db.product.find_many(
+            order={"createdAt": "desc"},
+            skip=skip,
+            take=min(limit, 500)
+        )
     return products
 
 @app.get("/api/products/{product_id}", response_model=Product)
@@ -323,6 +357,120 @@ async def create_chat_message(message: ChatMessageCreate, db=Depends(get_db)):
     )
     
     return created_message
+
+# Speech-to-Speech Interaction
+import base64
+import subprocess
+
+def convert_to_wav(input_path: str) -> str:
+    output_path = input_path.replace('.webm', '.wav')
+    subprocess.run(["ffmpeg", "-y", "-i", input_path, output_path], check=True)
+    return output_path
+
+
+model = whisper.load_model("base", device="cpu") 
+def transcribe_audio(file_path: str) -> str:
+    result = model.transcribe(file_path)
+    return result["text"]
+
+
+def generate_tts_audio(text: str) -> str:
+    tts = gTTS(text=text, lang='en')
+    tts_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
+    tts.save(tts_path)
+    return tts_path
+
+import time
+@app.post("/api/talk")
+async def talk(
+    audio: UploadFile = File(...),
+    userId: str = Form(...),
+    db = Depends(get_db) 
+):
+    print(f"Received audio: {audio.filename}, size: {audio.size}")
+    print(f"User ID: {userId}")
+    # Save uploaded audio to temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio:
+        audio_bytes = await audio.read()
+        temp_audio.write(audio_bytes)
+        webm_path = temp_audio.name
+
+    try:
+         # Step 2: Convert to WAV
+        wav_path = convert_to_wav(webm_path)
+
+        # 1. STT
+        text = transcribe_audio(wav_path).strip()
+        userId = userId.strip()
+
+        print("Transcribed:", text)
+        print("User ID cleaned:", userId)
+
+        if not text:
+            raise HTTPException(status_code=400, detail="Transcription returned empty text.")
+        if not userId:
+            raise HTTPException(status_code=400, detail="Missing userId.")
+
+        print("Saving message with:", {"userId": userId, "content": text})
+
+        try:
+            async with httpx.AsyncClient(timeout=100.0) as client:
+               
+                chat_payload = {
+                    "message": text,      # Agent expects "message" not "content"
+                    "user_id": userId     # Agent expects "user_id" not "userId"
+                }
+                start_time = time.time()
+                chat_response = await client.post("http://localhost:8001/chat", json=chat_payload)
+                print(f"Agent response time: {time.time() - start_time:.2f}s")
+                print(f"Agent status: {chat_response.status_code}")
+                if chat_response.status_code != 200:
+                    print("Agent API error:", chat_response.status_code)
+                    print("Agent API response body:", await chat_response.text())
+                    raise HTTPException(status_code=chat_response.status_code, detail="Agent response failed")
+                reply_data = chat_response.json()
+                reply_text = reply_data.get("response", "").strip()
+                print(f"Agent response: {reply_data}")
+
+            if not reply_text:
+                reply_text = "Sorry, I couldn't understand that."
+        except httpx.ReadTimeout:
+            reply_text = "The agent is taking longer than expected. Please try again."
+
+
+        # 5. TTS
+        tts_audio_path = generate_tts_audio(reply_text)
+
+        # Read audio file and encode as base64
+        with open(tts_audio_path, "rb") as audio_file:
+            audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
+        
+        # Return both text and audio data
+        return JSONResponse(
+            content={
+                "user_transcription": text,    # User's spoken words
+                "agent_text": reply_text,      # Agent's text response
+                "audio": audio_base64,
+                "content_type": "audio/mpeg"
+            },
+            headers={"Access-Control-Allow-Origin": "http://localhost:5173"}
+        )
+
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Audio processing error"},
+            headers={"Access-Control-Allow-Origin": "http://localhost:5173"}
+        )
+    finally:
+        os.remove(webm_path)
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+
+
 
 if __name__ == "__main__":
     import uvicorn
