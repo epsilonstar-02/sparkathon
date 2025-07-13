@@ -116,7 +116,7 @@ import { ScrollArea } from '../components/ScrollArea';
 import { MessageInput } from '../components/MessageInput';
 import { motion, AnimatePresence } from 'framer-motion';
 import { talkService } from '../api/services/talkService';
-import { FaMicrophone, FaStop, FaVolumeUp } from 'react-icons/fa';
+import { FaMicrophone, FaStop, FaVolumeUp, FaRobot, FaCheckCircle } from 'react-icons/fa';
 
 export default function Chat() {
   const [chat, setChat] = useState([
@@ -136,6 +136,21 @@ export default function Chat() {
   const audioRef = useRef(null);
   const chatBottomRef = useRef(null);
   const thoughtsBottomRef = useRef(null);
+
+  // Add state for closing the thought stream
+  const [showThoughtStream, setShowThoughtStream] = useState(true);
+  // Add state for manual close
+  const [manuallyClosed, setManuallyClosed] = useState(false);
+
+  // Auto-hide AI Thought Stream after agent finishes responding
+  useEffect(() => {
+    if (!thinking && showThoughtStream && !manuallyClosed) {
+      const timer = setTimeout(() => {
+        setShowThoughtStream(false);
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [thinking, showThoughtStream, manuallyClosed]);
 
   // Scroll to bottom of chat when messages change
   useLayoutEffect(() => {
@@ -242,6 +257,10 @@ export default function Chat() {
   const handleSend = async (msg) => {
     if (!msg.trim()) return;
     
+    // Show the AI Thought Stream when sending
+    setShowThoughtStream(true);
+    setManuallyClosed(false);
+    
     // Add user message to chat
     const userMessageId = Date.now();
     const userMessage = { 
@@ -306,6 +325,10 @@ export default function Chat() {
     try {
       setIsRecording(true);
       audioChunksRef.current = [];
+      
+      // Show the AI Thought Stream when sending voice
+      setShowThoughtStream(true);
+      setManuallyClosed(false);
       
       // Add temporary voice message to chat
       const tempMessageId = `temp-voice-${Date.now()}`;
@@ -441,6 +464,15 @@ export default function Chat() {
     }
   };
 
+  // Animated typing dots for Copilot-style agent typing
+  const TypingDots = () => (
+    <span className="inline-flex items-center ml-1">
+      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.3s] mx-0.5"></span>
+      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.15s] mx-0.5"></span>
+      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce mx-0.5"></span>
+    </span>
+  );
+
   return (
     <div className="flex flex-col h-[80vh] rounded-2xl shadow-2xl bg-white/70 backdrop-blur-lg overflow-hidden border border-blue-100">
       <div className="flex flex-1 min-h-0">
@@ -470,8 +502,9 @@ export default function Chat() {
                       msg.isError ? 'text-red-600' : ''
                     }`}>
                       {msg.text}
-                      {msg.isTyping && (
-                        <span className="ml-1 inline-block w-2 h-4 bg-blue-500 animate-pulse"></span>
+                      {/* Copilot-style animated dots for agent typing */}
+                      {msg.sender === 'agent' && msg.isTyping && (
+                        <TypingDots />
                       )}
                     </div>
                     
@@ -505,41 +538,72 @@ export default function Chat() {
         </ScrollArea>
         
         {/* Thought Stream */}
-        <ScrollArea className="w-[30%] min-w-[220px] max-w-xs p-6 space-y-4 bg-gradient-to-br from-blue-100/80 to-white/80">
-          <div className="font-bold text-blue-700 mb-2 text-lg tracking-tight">Agent Thought Stream</div>
-          <AnimatePresence>
-            {thoughts.map(thought => (
-              <motion.div
-                key={thought.id}
-                initial={{ opacity: 0, x: 30 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 30 }}
-                transition={{ duration: 0.3 }}
-              >
-                <Card className="p-4 bg-white/90 shadow-sm border-l-4 border-blue-400">
-                  <div className="text-gray-700 text-sm">{thought.text}</div>
-                </Card>
-              </motion.div>
-            ))}
-            {thinking && !Object.values(activeTyping).some(v => v) && (
-              <motion.div
-                key="thinking"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.4, repeat: Infinity, repeatType: 'reverse' }}
-              >
-                <Card className="p-4 bg-blue-50/80 border-l-4 border-blue-400 animate-pulse">
-                  <div className="text-blue-600 font-medium flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
-                    Thinking...
-                  </div>
-                </Card>
-              </motion.div>
-            )}
-          </AnimatePresence>
-          <div ref={thoughtsBottomRef} />
-        </ScrollArea>
+        <>
+        <div
+          className={`fixed right-8 top-24 w-[340px] max-w-xs z-30 transition-transform duration-500 ${showThoughtStream ? 'translate-x-0 opacity-100' : 'translate-x-20 opacity-0 pointer-events-none'}`}
+          style={{ willChange: 'transform, opacity' }}
+        >
+          <div className="rounded-2xl shadow-2xl bg-white/90 border border-blue-100 overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-3 bg-gradient-to-r from-blue-50/80 to-white/80 border-b">
+                <div className="flex items-center gap-2">
+                  <span className="bg-blue-100 p-2 rounded-full"><FaRobot className="text-blue-500 text-lg" /></span>
+                  <span className="font-bold text-blue-700 text-lg">AI Thought Stream</span>
+                </div>
+                <button onClick={() => { setShowThoughtStream(false); setManuallyClosed(true); }} className="text-blue-400 hover:text-blue-700 p-1 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-200">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                </button>
+              </div>
+              <div className="px-5 pt-2 pb-4 text-xs text-blue-500/70 border-b">These thoughts are ephemeral and will disappear automatically.</div>
+              <div className="max-h-96 overflow-y-auto px-4 py-3 space-y-3 bg-blue-50/40">
+                <AnimatePresence>
+                  {thoughts.map(thought => (
+                    <motion.div
+                      key={thought.id}
+                      initial={{ opacity: 0, x: 30 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 30 }}
+                      transition={{ duration: 0.3 }}
+                    >
+                      <div className="flex items-start gap-2 bg-white rounded-xl shadow border border-blue-100 p-3">
+                        <FaCheckCircle className="text-green-400 mt-0.5" />
+                        <div className="flex-1">
+                          <div className="text-gray-800 text-sm leading-snug">{thought.text}</div>
+                          {/* Optionally, add a timestamp if available: <div className="text-xs text-gray-400 mt-1">18:51:27</div> */}
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                  {thinking && !Object.values(activeTyping).some(v => v) && (
+                    <motion.div
+                      key="thinking"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.4, repeat: Infinity, repeatType: 'reverse' }}
+                    >
+                      <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-xl p-3 animate-pulse">
+                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+                        <span className="text-blue-600 font-medium">Thinking...</span>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <div ref={thoughtsBottomRef} />
+              </div>
+            </div>
+          </div>
+        {/* Floating button to reopen Thought Stream after closed */}
+        {!showThoughtStream && manuallyClosed && (
+          <button
+            className="fixed right-8 top-24 z-40 bg-blue-600 text-white rounded-full shadow-lg p-3 hover:bg-blue-700 transition"
+            onClick={() => { setShowThoughtStream(true); setManuallyClosed(false); }}
+            aria-label="Show AI Thought Stream"
+          >
+            <FaRobot className="text-xl" />
+          </button>
+        )}
+        </>
       </div>
       
       {/* Input Area with Voice Controls */}

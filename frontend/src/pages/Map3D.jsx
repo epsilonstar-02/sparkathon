@@ -325,25 +325,27 @@ const ShoppingListPanel = ({
   isExpanded 
 }) => {
   return (
-    <div className="w-80 h-full bg-white shadow-lg flex flex-col">
-      <div className="p-4 border-b flex justify-between items-center">
-        <h2 className="text-xl font-bold text-gray-800">Shopping List</h2>
-        <button onClick={toggleCart} className="p-2 text-gray-500 hover:text-gray-700">
+    <div className="w-80 h-full bg-white rounded-2xl shadow-2xl flex flex-col border border-blue-100">
+      <div className="p-4 border-b flex justify-between items-center rounded-t-2xl bg-gradient-to-r from-blue-50/80 to-white/80">
+        <h2 className="text-xl font-bold text-blue-800 flex items-center gap-2">
+          <svg xmlns='http://www.w3.org/2000/svg' className='h-6 w-6 text-blue-500' fill='none' viewBox='0 0 24 24' stroke='currentColor'><path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z' /></svg>
+          Shopping List
+        </h2>
+        <button onClick={toggleCart} className="p-2 rounded-full text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-200">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
           </svg>
         </button>
       </div>
-      
       <div className="overflow-y-auto flex-1 p-4 space-y-4">
         {!isEntered ? (
-          <div className="text-center py-12">
-            <div className="text-6xl mb-4">🛒</div>
-            <h3 className="text-xl font-semibold mb-2">Welcome to our 3D Store!</h3>
-            <p className="text-gray-600 mb-6">Enter the store to start shopping</p>
+          <div className="text-center py-16 flex flex-col items-center justify-center">
+            <div className="text-7xl mb-6 animate-bounce">🛒</div>
+            <h3 className="text-2xl font-bold mb-2 text-gray-800">Welcome to our 3D Store!</h3>
+            <p className="text-gray-600 mb-8 text-base">Enter the store to start shopping</p>
             <button
               onClick={handleEnterStore}
-              className="px-6 py-3 bg-blue-600 text-white rounded-full font-medium hover:bg-blue-700 transition"
+              className="px-8 py-3 bg-blue-600 text-white rounded-full font-semibold text-lg shadow-lg hover:bg-blue-700 transition focus:outline-none focus:ring-2 focus:ring-blue-300"
             >
               Enter Store
             </button>
@@ -1006,10 +1008,10 @@ export default function Map3D() {
           {/* Sidebar */}
            <div 
             ref={sidebarRef}
-            className={`h-full bg-white shadow-lg flex flex-col transition-all duration-300 ease-in-out ${
-              isCartOpen ? 'block' : 'hidden md:block'
-            }`}
-            style={{ width: isCartOpen ? `${sidebarWidth}px` : '0' }}
+            className={`h-full bg-white shadow-lg flex flex-col transition-all duration-500 ease-in-out ${
+              isCartOpen ? 'block' : 'hidden'
+            } ${isCartOpen ? 'opacity-100' : 'opacity-0'}`}
+            style={{ width: isCartOpen ? `${sidebarWidth}px` : '0', minWidth: isCartOpen ? `${sidebarWidth}px` : '0' }}
           >
             <div className="relative h-full">
               <ShoppingListPanel 
@@ -1033,16 +1035,30 @@ export default function Map3D() {
               {/* Toggle Button */}
               <button 
                 className="absolute top-1/2 -right-4 bg-white rounded-full p-1 shadow-md z-30"
-                onClick={toggleSidebarWidth}
+                onClick={() => setIsCartOpen(false)}
+                style={{ transform: 'translateY(-50%)' }}
+                aria-label="Hide sidebar"
               >
-                {sidebarWidth > 380 ? <FiChevronLeft /> : <FiChevronRight />}
+                <FiChevronLeft />
               </button>
             </div>
           </div>
           
+          {/* Floating arrow to reopen sidebar when hidden */}
+          {!isCartOpen && (
+            <button
+              className="fixed top-1/2 left-2 z-40 bg-white rounded-full p-2 shadow-lg border border-blue-100 hover:bg-blue-50 transition"
+              style={{ transform: 'translateY(-50%)' }}
+              onClick={() => setIsCartOpen(true)}
+              aria-label="Show sidebar"
+            >
+              <FiChevronRight className="text-blue-600 text-2xl" />
+            </button>
+          )}
+          
           {/* 3D Canvas */}
-           <div className="flex-1 relative transition-all duration-300" 
-               style={{ marginLeft: isCartOpen ? '0' : `-${sidebarWidth}px` }}>
+          <div className={`flex-1 relative transition-all duration-500 ${!isCartOpen ? 'rounded-2xl shadow-2xl m-6 bg-white/80' : ''}`} 
+              style={{ marginLeft: isCartOpen ? '0' : '0' }}>
             <Canvas
               ref={canvasRef}
               shadows
